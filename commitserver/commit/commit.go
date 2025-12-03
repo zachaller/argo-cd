@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	NoteNamespace = "source-hydrator" // NoteNamespace is the custom git notes namespace used by the hydrator to store and retrieve commit-related metadata.
-	ManifestYaml  = "manifest.yaml"   // ManifestYaml constant for the manifest yaml
+	NoteNamespace = "hydrator.metadata" // NoteNamespace is the custom git notes namespace used by the hydrator to store and retrieve commit-related metadata.
+	ManifestYaml  = "manifest.yaml"     // ManifestYaml constant for the manifest yaml
 )
 
 // Service is the service that handles commit requests.
@@ -255,7 +255,7 @@ func (s *Service) initGitClient(logCtx *log.Entry, r *apiclient.CommitHydratedMa
 	}
 
 	logCtx.Debugf("Fetching repo %s", r.Repo.Repo)
-	err = gitClient.Fetch("")
+	err = gitClient.Fetch("", 0)
 	if err != nil {
 		cleanupOrLog()
 		return nil, "", nil, fmt.Errorf("failed to clone repo: %w", err)
