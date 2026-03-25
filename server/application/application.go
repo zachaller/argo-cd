@@ -352,7 +352,7 @@ func (s *Server) Create(ctx context.Context, q *application.ApplicationCreateReq
 	defer s.projectLock.RUnlock(a.Spec.GetProject())
 	lockDur := time.Since(lockStart)
 	if lockDur > 100*time.Millisecond {
-		logCtx.WithFields(log.Fields{"duration": lockDur.String(), "debugTag": "argo504debug"}).Info("projectLock.RLock acquisition was slow")
+		logCtx.WithFields(log.Fields{"duration_ms": lockDur.Milliseconds(), "debugTag": "argo504debug"}).Warn("projectLock.RLock acquisition was slow")
 	}
 
 	validate := true
@@ -368,7 +368,7 @@ func (s *Server) Create(ctx context.Context, q *application.ApplicationCreateReq
 	validateStart := time.Now()
 	err = s.validateAndNormalizeApp(ctx, a, proj, validate)
 	validateDur := time.Since(validateStart)
-	logCtx.WithFields(log.Fields{"duration": validateDur.String(), "validate": validate, "debugTag": "argo504debug"}).Info("validateAndNormalizeApp completed")
+	logCtx.WithFields(log.Fields{"duration_ms": validateDur.Milliseconds(), "validate": validate, "debugTag": "argo504debug"}).Info("validateAndNormalizeApp completed")
 	if err != nil {
 		return nil, fmt.Errorf("error while validating and normalizing app: %w", err)
 	}
@@ -391,13 +391,13 @@ func (s *Server) Create(ctx context.Context, q *application.ApplicationCreateReq
 	created, err := s.appclientset.ArgoprojV1alpha1().Applications(appNs).Create(ctx, a, metav1.CreateOptions{})
 	k8sDur := time.Since(k8sStart)
 	if err == nil {
-		logCtx.WithFields(log.Fields{"duration": k8sDur.String(), "debugTag": "argo504debug"}).Info("k8s Application.Create succeeded")
+		logCtx.WithFields(log.Fields{"duration_ms": k8sDur.Milliseconds(), "debugTag": "argo504debug"}).Info("k8s Application.Create succeeded")
 		s.logAppEvent(ctx, created, argo.EventReasonResourceCreated, "created application")
 		s.waitSync(created)
-		logCtx.WithFields(log.Fields{"totalDuration": time.Since(createStart).String(), "debugTag": "argo504debug"}).Info("Create handler completed")
+		logCtx.WithFields(log.Fields{"total_duration_ms": time.Since(createStart).Milliseconds(), "debugTag": "argo504debug"}).Info("Create handler completed")
 		return created, nil
 	}
-	logCtx.WithFields(log.Fields{"duration": k8sDur.String(), "error": err.Error(), "debugTag": "argo504debug"}).Info("k8s Application.Create returned error")
+	logCtx.WithFields(log.Fields{"duration_ms": k8sDur.Milliseconds(), "error": err.Error(), "debugTag": "argo504debug"}).Info("k8s Application.Create returned error")
 
 	if !apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("error creating application: %w", err)
@@ -415,7 +415,7 @@ func (s *Server) Create(ctx context.Context, q *application.ApplicationCreateReq
 		reflect.DeepEqual(existing.Finalizers, a.Finalizers)
 
 	if equalSpecs {
-		logCtx.WithFields(log.Fields{"totalDuration": time.Since(createStart).String(), "debugTag": "argo504debug"}).Info("Create handler completed (idempotent, specs equal)")
+		logCtx.WithFields(log.Fields{"total_duration_ms": time.Since(createStart).Milliseconds(), "debugTag": "argo504debug"}).Info("Create handler completed (idempotent, specs equal)")
 		return existing, nil
 	}
 	if q.Upsert == nil || !*q.Upsert {
@@ -426,11 +426,11 @@ func (s *Server) Create(ctx context.Context, q *application.ApplicationCreateReq
 	}
 	upsertStart := time.Now()
 	updated, err := s.updateApp(ctx, existing, a, true)
-	logCtx.WithFields(log.Fields{"duration": time.Since(upsertStart).String(), "debugTag": "argo504debug"}).Info("upsert updateApp completed")
+	logCtx.WithFields(log.Fields{"duration_ms": time.Since(upsertStart).Milliseconds(), "debugTag": "argo504debug"}).Info("upsert updateApp completed")
 	if err != nil {
 		return nil, fmt.Errorf("error updating application: %w", err)
 	}
-	logCtx.WithFields(log.Fields{"totalDuration": time.Since(createStart).String(), "debugTag": "argo504debug"}).Info("Create handler completed (upsert)")
+	logCtx.WithFields(log.Fields{"total_duration_ms": time.Since(createStart).Milliseconds(), "debugTag": "argo504debug"}).Info("Create handler completed (upsert)")
 	return updated, nil
 }
 
@@ -1329,7 +1329,7 @@ func (s *Server) validateAndNormalizeApp(ctx context.Context, app *v1alpha1.Appl
 	currApp, err := s.appclientset.ArgoprojV1alpha1().Applications(appNs).Get(ctx, app.Name, metav1.GetOptions{})
 	getAppDur := time.Since(getAppStart)
 	if getAppDur > 2*time.Second {
-		logCtx.WithFields(log.Fields{"duration": getAppDur.String(), "debugTag": "argo504debug"}).Info("k8s Applications.Get was slow")
+		logCtx.WithFields(log.Fields{"duration_ms": getAppDur.Milliseconds(), "debugTag": "argo504debug"}).Warn("k8s Applications.Get was slow")
 	}
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -1358,10 +1358,10 @@ func (s *Server) validateAndNormalizeApp(ctx context.Context, app *v1alpha1.Appl
 	destDur := time.Since(destStart)
 	if destDur > 2*time.Second {
 		logCtx.WithFields(log.Fields{
-			"duration":    destDur.String(),
-			"destination": app.Spec.Destination.Server,
-			"debugTag":    "argo504debug",
-		}).Info("GetDestinationCluster (initial) was slow")
+			"duration_ms":  destDur.Milliseconds(),
+			"destination":  app.Spec.Destination.Server,
+			"debugTag":     "argo504debug",
+		}).Warn("GetDestinationCluster (initial) was slow")
 	}
 
 	var conditions []v1alpha1.ApplicationCondition
@@ -1372,12 +1372,12 @@ func (s *Server) validateAndNormalizeApp(ctx context.Context, app *v1alpha1.Appl
 		condition, err := argo.ValidateRepo(ctx, app, s.repoClientset, s.db, s.kubectl, proj, s.settingsMgr)
 		validateRepoDur := time.Since(validateRepoStart)
 		logCtx.WithFields(log.Fields{
-			"duration":    validateRepoDur.String(),
-			"destination": app.Spec.Destination.Server,
-			"debugTag":    "argo504debug",
+			"duration_ms":  validateRepoDur.Milliseconds(),
+			"destination":  app.Spec.Destination.Server,
+			"debugTag":     "argo504debug",
 		}).Info("ValidateRepo completed")
 		if validateRepoDur > 10*time.Second {
-			logCtx.WithFields(log.Fields{"duration": validateRepoDur.String(), "debugTag": "argo504debug"}).Info("ValidateRepo exceeded 10s, risk of ALB 504")
+			logCtx.WithFields(log.Fields{"duration_ms": validateRepoDur.Milliseconds(), "debugTag": "argo504debug"}).Warn("ValidateRepo exceeded 10s, risk of ALB 504")
 		}
 		if err != nil {
 			return fmt.Errorf("error validating the repo: %w", err)
