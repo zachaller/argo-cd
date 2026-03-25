@@ -309,16 +309,20 @@ func ValidateRepo(
 	settingsMgr *settings.SettingsManager,
 ) ([]argoappv1.ApplicationCondition, error) {
 	spec := &app.Spec
-	logCtx := log.WithField("application", app.QualifiedName())
+	logCtx := log.WithFields(log.Fields{"application": app.QualifiedName(), "debugTag": "argo504debug"})
+	validateRepoOverallStart := time.Now()
 
 	conditions := make([]argoappv1.ApplicationCondition, 0)
 
+	repoClientStart := time.Now()
 	conn, repoClient, err := repoClientset.NewRepoServerClient()
+	logCtx.WithField("duration_ms", time.Since(repoClientStart).Milliseconds()).Info("ValidateRepo: NewRepoServerClient (gRPC dial to repo-server) completed")
 	if err != nil {
 		return nil, fmt.Errorf("error instantiating new repo server client: %w", err)
 	}
 	defer utilio.Close(conn)
 
+	dbSetupStart := time.Now()
 	helmOptions, err := settingsMgr.GetHelmSettings()
 	if err != nil {
 		return nil, fmt.Errorf("error getting helm settings: %w", err)
@@ -356,6 +360,7 @@ func ValidateRepo(
 	if err != nil {
 		return nil, fmt.Errorf("failed to get permitted OCI credentials for project %q: %w", proj.Name, err)
 	}
+	logCtx.WithField("duration_ms", time.Since(dbSetupStart).Milliseconds()).Info("ValidateRepo: DB/settings setup (helm repos, OCI repos, creds) completed")
 
 	destStart := time.Now()
 	destCluster, err := GetDestinationCluster(ctx, spec.Destination, db)
