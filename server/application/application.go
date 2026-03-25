@@ -336,29 +336,39 @@ func (s *Server) List(ctx context.Context, q *application.ApplicationQuery) (*v1
 
 // Create creates an application
 func (s *Server) Create(ctx context.Context, q *application.ApplicationCreateRequest) (*v1alpha1.Application, error) {
+	createStart := time.Now()
 	if q.GetApplication() == nil {
 		return nil, errors.New("error creating application: application is nil in request")
 	}
 	a := q.GetApplication()
+	logCtx := log.WithFields(applog.GetAppLogFields(a))
 
 	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionCreate, a.RBACName(s.ns)); err != nil {
 		return nil, err
 	}
 
+	lockStart := time.Now()
 	s.projectLock.RLock(a.Spec.GetProject())
 	defer s.projectLock.RUnlock(a.Spec.GetProject())
+	lockDur := time.Since(lockStart)
+	if lockDur > 100*time.Millisecond {
+		logCtx.WithFields(log.Fields{"duration": lockDur.String(), "debugTag": "argo504debug"}).Warn("projectLock.RLock acquisition was slow")
+	}
 
 	validate := true
 	if q.Validate != nil {
 		validate = *q.Validate
 	}
 
-	proj, err := s.getAppProject(ctx, a, log.WithFields(applog.GetAppLogFields(a)))
+	proj, err := s.getAppProject(ctx, a, logCtx)
 	if err != nil {
 		return nil, err
 	}
 
+	validateStart := time.Now()
 	err = s.validateAndNormalizeApp(ctx, a, proj, validate)
+	validateDur := time.Since(validateStart)
+	logCtx.WithFields(log.Fields{"duration": validateDur.String(), "validate": validate, "debugTag": "argo504debug"}).Info("validateAndNormalizeApp completed")
 	if err != nil {
 		return nil, fmt.Errorf("error while validating and normalizing app: %w", err)
 	}
@@ -369,26 +379,30 @@ func (s *Server) Create(ctx context.Context, q *application.ApplicationCreateReq
 		return nil, security.NamespaceNotPermittedError(appNs)
 	}
 
-	// Don't let the app creator set the operation explicitly. Those requests should always go through the Sync API.
 	if a.Operation != nil {
-		log.WithFields(applog.GetAppLogFields(a)).
+		logCtx.
 			WithFields(log.Fields{
 				argocommon.SecurityField: argocommon.SecurityLow,
 			}).Warn("User attempted to set operation on application creation. This could have allowed them to bypass branch protection rules by setting manifests directly. Ignoring the set operation.")
 		a.Operation = nil
 	}
 
+	k8sStart := time.Now()
 	created, err := s.appclientset.ArgoprojV1alpha1().Applications(appNs).Create(ctx, a, metav1.CreateOptions{})
+	k8sDur := time.Since(k8sStart)
 	if err == nil {
+		logCtx.WithFields(log.Fields{"duration": k8sDur.String(), "debugTag": "argo504debug"}).Info("k8s Application.Create succeeded")
 		s.logAppEvent(ctx, created, argo.EventReasonResourceCreated, "created application")
 		s.waitSync(created)
+		logCtx.WithFields(log.Fields{"totalDuration": time.Since(createStart).String(), "debugTag": "argo504debug"}).Info("Create handler completed")
 		return created, nil
 	}
+	logCtx.WithFields(log.Fields{"duration": k8sDur.String(), "error": err.Error(), "debugTag": "argo504debug"}).Warn("k8s Application.Create returned error")
+
 	if !apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("error creating application: %w", err)
 	}
 
-	// act idempotent if existing spec matches new spec
 	existing, err := s.appLister.Applications(appNs).Get(a.Name)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "unable to check existing application details (%s): %v", appNs, err)
@@ -401,6 +415,7 @@ func (s *Server) Create(ctx context.Context, q *application.ApplicationCreateReq
 		reflect.DeepEqual(existing.Finalizers, a.Finalizers)
 
 	if equalSpecs {
+		logCtx.WithFields(log.Fields{"totalDuration": time.Since(createStart).String(), "debugTag": "argo504debug"}).Info("Create handler completed (idempotent, specs equal)")
 		return existing, nil
 	}
 	if q.Upsert == nil || !*q.Upsert {
@@ -409,10 +424,13 @@ func (s *Server) Create(ctx context.Context, q *application.ApplicationCreateReq
 	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionUpdate, a.RBACName(s.ns)); err != nil {
 		return nil, err
 	}
+	upsertStart := time.Now()
 	updated, err := s.updateApp(ctx, existing, a, true)
+	logCtx.WithFields(log.Fields{"duration": time.Since(upsertStart).String(), "debugTag": "argo504debug"}).Info("upsert updateApp completed")
 	if err != nil {
 		return nil, fmt.Errorf("error updating application: %w", err)
 	}
+	logCtx.WithFields(log.Fields{"totalDuration": time.Since(createStart).String(), "debugTag": "argo504debug"}).Info("Create handler completed (upsert)")
 	return updated, nil
 }
 
@@ -1290,11 +1308,12 @@ func (s *Server) Watch(q *application.ApplicationQuery, ws application.Applicati
 }
 
 func (s *Server) validateAndNormalizeApp(ctx context.Context, app *v1alpha1.Application, proj *v1alpha1.AppProject, validate bool) error {
+	logCtx := log.WithFields(applog.GetAppLogFields(app))
+
 	if app.GetName() == "" {
 		return errors.New("resource name may not be empty")
 	}
 
-	// ensure sources names are unique
 	if app.Spec.HasMultipleSources() {
 		sourceNames := make(map[string]bool)
 		for _, source := range app.Spec.Sources {
@@ -1306,42 +1325,60 @@ func (s *Server) validateAndNormalizeApp(ctx context.Context, app *v1alpha1.Appl
 	}
 
 	appNs := s.appNamespaceOrDefault(app.Namespace)
+	getAppStart := time.Now()
 	currApp, err := s.appclientset.ArgoprojV1alpha1().Applications(appNs).Get(ctx, app.Name, metav1.GetOptions{})
+	getAppDur := time.Since(getAppStart)
+	if getAppDur > 2*time.Second {
+		logCtx.WithFields(log.Fields{"duration": getAppDur.String(), "debugTag": "argo504debug"}).Warn("k8s Applications.Get was slow")
+	}
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
 			return fmt.Errorf("error getting application by name: %w", err)
 		}
-		// Kubernetes go-client will return a pointer to a zero-value app instead of nil, even
-		// though the API response was NotFound. This behavior was confirmed via logs.
 		currApp = nil
 	}
 	if currApp != nil && currApp.Spec.GetProject() != app.Spec.GetProject() {
-		// When changing projects, caller must have application create & update privileges in new project
-		// NOTE: the update check was already verified in the caller to this function
 		if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionCreate, app.RBACName(s.ns)); err != nil {
 			return err
 		}
-		// They also need 'update' privileges in the old project
 		if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionUpdate, currApp.RBACName(s.ns)); err != nil {
 			return err
 		}
-		// Validate that the new project exists and the application is allowed to use it
-		newProj, err := s.getAppProject(ctx, app, log.WithFields(applog.GetAppLogFields(app)))
+		newProj, err := s.getAppProject(ctx, app, logCtx)
 		if err != nil {
 			return err
 		}
 		proj = newProj
 	}
 
+	destStart := time.Now()
 	if _, err := argo.GetDestinationCluster(ctx, app.Spec.Destination, s.db); err != nil {
 		return status.Errorf(codes.InvalidArgument, "application destination spec for %s is invalid: %s", app.Name, err.Error())
+	}
+	destDur := time.Since(destStart)
+	if destDur > 2*time.Second {
+		logCtx.WithFields(log.Fields{
+			"duration":    destDur.String(),
+			"destination": app.Spec.Destination.Server,
+			"debugTag":    "argo504debug",
+		}).Warn("GetDestinationCluster (initial) was slow")
 	}
 
 	var conditions []v1alpha1.ApplicationCondition
 
 	if validate {
 		conditions := make([]v1alpha1.ApplicationCondition, 0)
+		validateRepoStart := time.Now()
 		condition, err := argo.ValidateRepo(ctx, app, s.repoClientset, s.db, s.kubectl, proj, s.settingsMgr)
+		validateRepoDur := time.Since(validateRepoStart)
+		logCtx.WithFields(log.Fields{
+			"duration":    validateRepoDur.String(),
+			"destination": app.Spec.Destination.Server,
+			"debugTag":    "argo504debug",
+		}).Info("ValidateRepo completed")
+		if validateRepoDur > 10*time.Second {
+			logCtx.WithFields(log.Fields{"duration": validateRepoDur.String(), "debugTag": "argo504debug"}).Warn("ValidateRepo exceeded 10s, risk of ALB 504")
+		}
 		if err != nil {
 			return fmt.Errorf("error validating the repo: %w", err)
 		}
@@ -1359,7 +1396,6 @@ func (s *Server) validateAndNormalizeApp(ctx context.Context, app *v1alpha1.Appl
 		return status.Errorf(codes.InvalidArgument, "application spec for %s is invalid: %s", app.Name, argo.FormatAppConditions(conditions))
 	}
 
-	// Validate managed-by-url annotation
 	managedByURLConditions := argo.ValidateManagedByURL(app)
 	if len(managedByURLConditions) > 0 {
 		return status.Errorf(codes.InvalidArgument, "application spec for %s is invalid: %s", app.Name, argo.FormatAppConditions(managedByURLConditions))

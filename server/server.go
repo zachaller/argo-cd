@@ -1554,6 +1554,7 @@ func (server *ArgoCDServer) Authenticate(ctx context.Context) (context.Context, 
 
 // getClaims extracts, validates and refreshes a JWT token from an incoming request context.
 func (server *ArgoCDServer) getClaims(ctx context.Context) (jwt.Claims, string, error) {
+	getClaimsStart := time.Now()
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return nil, "", ErrNoSession
@@ -1562,9 +1563,13 @@ func (server *ArgoCDServer) getClaims(ctx context.Context) (jwt.Claims, string, 
 	if tokenString == "" {
 		return nil, "", ErrNoSession
 	}
-	// A valid argocd-issued token is automatically refreshed here prior to expiration.
-	// OIDC tokens will be verified but will not be refreshed here.
+
+	verifyStart := time.Now()
 	claims, newToken, err := server.sessionMgr.VerifyToken(ctx, tokenString)
+	verifyDur := time.Since(verifyStart)
+	if verifyDur > 2*time.Second {
+		log.WithFields(log.Fields{"duration": verifyDur.String(), "debugTag": "argo504debug"}).Warn("VerifyToken was slow")
+	}
 	if err != nil {
 		return claims, "", status.Errorf(codes.Unauthenticated, "invalid session: %v", err)
 	}
@@ -1572,13 +1577,31 @@ func (server *ArgoCDServer) getClaims(ctx context.Context) (jwt.Claims, string, 
 	finalClaims := claims
 	oidcConfig := server.settings.OIDCConfig()
 	if oidcConfig != nil || server.settings.IsDexConfigured() {
+		userInfoStart := time.Now()
 		updatedClaims, err := server.ssoClientApp.SetGroupsFromUserInfo(ctx, claims, util_session.SessionManagerClaimsIssuer)
+		userInfoDur := time.Since(userInfoStart)
+		if userInfoDur > 2*time.Second {
+			log.WithFields(log.Fields{
+				"duration": userInfoDur.String(),
+				"sub":      jwtutil.StringField(claims.(jwt.MapClaims), "sub"),
+				"debugTag": "argo504debug",
+			}).Warn("SetGroupsFromUserInfo (IDP userinfo) was slow")
+		}
 		if err != nil {
 			return claims, "", status.Errorf(codes.Unauthenticated, "invalid session: %v", err)
 		}
 		finalClaims = updatedClaims
-		// OIDC tokens are automatically refreshed here prior to expiration
+
+		refreshStart := time.Now()
 		refreshedToken, err := server.ssoClientApp.CheckAndRefreshToken(ctx, updatedClaims, server.settings.RefreshTokenThresholdWithConfig(oidcConfig))
+		refreshDur := time.Since(refreshStart)
+		if refreshDur > 2*time.Second {
+			log.WithFields(log.Fields{
+				"duration": refreshDur.String(),
+				"sub":      jwtutil.StringField(updatedClaims, "sub"),
+				"debugTag": "argo504debug",
+			}).Warn("CheckAndRefreshToken (IDP token endpoint) was slow")
+		}
 		if err != nil {
 			log.Errorf("error checking and refreshing token: %v", err)
 		}
@@ -1586,6 +1609,11 @@ func (server *ArgoCDServer) getClaims(ctx context.Context) (jwt.Claims, string, 
 			newToken = refreshedToken
 			log.Infof("refreshed token for subject: %v", jwtutil.StringField(updatedClaims, "sub"))
 		}
+	}
+
+	totalDur := time.Since(getClaimsStart)
+	if totalDur > 5*time.Second {
+		log.WithFields(log.Fields{"duration": totalDur.String(), "debugTag": "argo504debug"}).Warn("getClaims total time exceeded 5s, risk of ALB 504")
 	}
 
 	return finalClaims, newToken, nil

@@ -3,8 +3,10 @@ package grpc
 import (
 	"context"
 	"errors"
+	"time"
 
 	giterr "github.com/go-git/go-git/v5/plumbing/transport"
+	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -119,8 +121,26 @@ func ErrorCodeGitStreamServerInterceptor() grpc.StreamServerInterceptor {
 
 // ErrorCodeK8sUnaryServerInterceptor replaces Kubernetes errors with relevant gRPC equivalents, if any.
 func ErrorCodeK8sUnaryServerInterceptor() grpc.UnaryServerInterceptor {
-	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+		start := time.Now()
 		resp, err = handler(ctx, req)
+		dur := time.Since(start)
+		if err != nil && (apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) || apierrors.IsServiceUnavailable(err)) {
+			log.WithFields(log.Fields{
+				"method":   info.FullMethod,
+				"duration": dur.String(),
+				"error":    err.Error(),
+				"debugTag": "argo504debug",
+			}).Warn("K8s timeout/unavailable error in gRPC handler, may cause ALB 504")
+		}
+		if dur > 30*time.Second {
+			log.WithFields(log.Fields{
+				"method":   info.FullMethod,
+				"duration": dur.String(),
+				"hasError": err != nil,
+				"debugTag": "argo504debug",
+			}).Warn("gRPC handler exceeded 30s, high risk of ALB 504")
+		}
 		return resp, kubeErrToGRPC(err)
 	}
 }

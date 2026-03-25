@@ -873,8 +873,24 @@ func (a *ClientApp) GetUserInfo(ctx context.Context, actualClaims jwt.MapClaims,
 	bearer := "Bearer " + string(accessTokenBytes)
 	request.Header.Set("Authorization", bearer)
 
+	userInfoStart := time.Now()
 	response, err := a.client.Do(request)
+	userInfoDur := time.Since(userInfoStart)
+	if userInfoDur > 2*time.Second {
+		log.WithFields(log.Fields{
+			"duration": userInfoDur.String(),
+			"url":      url,
+			"sub":      sub,
+			"debugTag": "argo504debug",
+		}).Warn("IDP userinfo HTTP request was slow (uses context.Background, no timeout)")
+	}
 	if err != nil {
+		log.WithFields(log.Fields{
+			"duration": userInfoDur.String(),
+			"url":      url,
+			"error":    err.Error(),
+			"debugTag": "argo504debug",
+		}).Error("IDP userinfo HTTP request failed")
 		return claims, false, fmt.Errorf("failed to query userinfo endpoint of IDP: %w", err)
 	}
 	defer response.Body.Close()
