@@ -326,6 +326,8 @@ func (s *Service) runRepoOperation(
 	hasMultipleSources bool,
 	refSources map[string]*v1alpha1.RefTarget,
 ) error {
+	repoOpLogCtx := log.WithFields(log.Fields{"repo": repo.Repo, "revision": revision, "debugTag": "argo504debug"})
+
 	if sanitizer, ok := grpc.SanitizerFromContext(ctx); ok {
 		// make sure a randomized path replaced with '.' in the error message
 		sanitizer.AddRegexReplacement(getRepoSanitizerRegex(s.rootDir), "<path to cached source>")
@@ -339,6 +341,7 @@ func (s *Service) runRepoOperation(
 	revision = textutils.FirstNonEmpty(revision, source.TargetRevision)
 	unresolvedRevision := revision
 
+	resolveStart := time.Now()
 	switch {
 	case source.IsOCI():
 		ociClient, revision, err = s.newOCIClientResolveRevision(ctx, repo, revision, settings.noCache || settings.noRevisionCache)
@@ -347,12 +350,22 @@ func (s *Service) runRepoOperation(
 	default:
 		gitClient, revision, err = s.newClientResolveRevision(repo, revision, gitClientOpts)
 	}
+	resolveDur := time.Since(resolveStart)
+	repoOpLogCtx.WithField("duration_ms", resolveDur.Milliseconds()).Info("runRepoOperation: resolve revision completed")
+	if resolveDur > 5*time.Second {
+		repoOpLogCtx.WithField("duration_ms", resolveDur.Milliseconds()).Info("runRepoOperation: resolve revision exceeded 5s")
+	}
 
 	if err != nil {
 		return err
 	}
 
+	refStart := time.Now()
 	repoRefs, err := resolveReferencedSources(hasMultipleSources, source.Helm, refSources, s.newClientResolveRevision, gitClientOpts)
+	refDur := time.Since(refStart)
+	if refDur > 2*time.Second {
+		repoOpLogCtx.WithField("duration_ms", refDur.Milliseconds()).Info("runRepoOperation: resolveReferencedSources was slow")
+	}
 	if err != nil {
 		return err
 	}
@@ -367,7 +380,13 @@ func (s *Service) runRepoOperation(
 	defer s.metricsServer.DecPendingRepoRequest(repo.Repo)
 
 	if settings.sem != nil {
+		semStart := time.Now()
 		err = settings.sem.Acquire(ctx, 1)
+		semDur := time.Since(semStart)
+		repoOpLogCtx.WithField("duration_ms", semDur.Milliseconds()).Info("runRepoOperation: semaphore acquired")
+		if semDur > 2*time.Second {
+			repoOpLogCtx.WithField("duration_ms", semDur.Milliseconds()).Info("runRepoOperation: semaphore acquisition was slow (parallelism contention)")
+		}
 		if err != nil {
 			return err
 		}
@@ -449,9 +468,15 @@ func (s *Service) runRepoOperation(
 			return &operationContext{chartPath, ""}, nil
 		})
 	}
+	lockStart := time.Now()
 	closer, err := s.repoLock.Lock(gitClient.Root(), revision, settings.allowConcurrent, func() (goio.Closer, error) {
 		return s.checkoutRevision(gitClient, revision, s.initConstants.SubmoduleEnabled, repo.Depth)
 	})
+	lockDur := time.Since(lockStart)
+	repoOpLogCtx.WithField("duration_ms", lockDur.Milliseconds()).Info("runRepoOperation: git repoLock.Lock + checkout completed")
+	if lockDur > 5*time.Second {
+		repoOpLogCtx.WithField("duration_ms", lockDur.Milliseconds()).Info("runRepoOperation: git lock/checkout exceeded 5s")
+	}
 	if err != nil {
 		return err
 	}
@@ -584,6 +609,10 @@ func resolveReferencedSources(hasMultipleSources bool, source *v1alpha1.Applicat
 }
 
 func (s *Service) GenerateManifest(ctx context.Context, q *apiclient.ManifestRequest) (*apiclient.ManifestResponse, error) {
+	genManifestStart := time.Now()
+	logCtx := log.WithFields(log.Fields{"application": q.AppName, "source": q.ApplicationSource.RepoURL, "path": q.ApplicationSource.Path, "debugTag": "argo504debug"})
+	logCtx.Info("GenerateManifest (repo-server) started")
+
 	var res *apiclient.ManifestResponse
 	var err error
 
@@ -598,7 +627,12 @@ func (s *Service) GenerateManifest(ctx context.Context, q *apiclient.ManifestReq
 	}
 
 	cacheFn := func(cacheKey string, refSourceCommitSHAs cache.ResolvedRevisions, firstInvocation bool) (bool, error) {
+		cacheStart := time.Now()
 		ok, resp, err := s.getManifestCacheEntry(cacheKey, q, refSourceCommitSHAs, firstInvocation)
+		cacheDur := time.Since(cacheStart)
+		if cacheDur > 2*time.Second {
+			logCtx.WithField("duration_ms", cacheDur.Milliseconds()).Info("manifest cache lookup was slow")
+		}
 		res = resp
 		return ok, err
 	}
@@ -636,7 +670,13 @@ func (s *Service) GenerateManifest(ctx context.Context, q *apiclient.ManifestReq
 	}
 
 	settings := operationSettings{sem: s.parallelismLimitSemaphore, noCache: q.NoCache, noRevisionCache: q.NoRevisionCache, allowConcurrent: q.ApplicationSource.AllowsConcurrentProcessing()}
+	repoOpStart := time.Now()
 	err = s.runRepoOperation(ctx, q.Revision, q.Repo, q.ApplicationSource, q.VerifySignature, cacheFn, operation, settings, q.HasMultipleSources, q.RefSources)
+	repoOpDur := time.Since(repoOpStart)
+	logCtx.WithField("duration_ms", repoOpDur.Milliseconds()).Info("runRepoOperation completed")
+	if repoOpDur > 10*time.Second {
+		logCtx.WithField("duration_ms", repoOpDur.Milliseconds()).Info("runRepoOperation exceeded 10s")
+	}
 
 	// if the tarDoneCh message is sent it means that the manifest
 	// generation is being managed by the cmp-server. In this case
@@ -649,6 +689,12 @@ func (s *Service) GenerateManifest(ctx context.Context, q *apiclient.ManifestReq
 		case err := <-promise.errCh:
 			return nil, err
 		}
+	}
+
+	totalDur := time.Since(genManifestStart)
+	logCtx.WithField("duration_ms", totalDur.Milliseconds()).Info("GenerateManifest (repo-server) completed")
+	if totalDur > 10*time.Second {
+		logCtx.WithField("duration_ms", totalDur.Milliseconds()).Info("GenerateManifest (repo-server) exceeded 10s, risk of ALB 504")
 	}
 	return res, err
 }
@@ -875,7 +921,22 @@ func (s *Service) runManifestGenAsync(ctx context.Context, repoRoot, commitSHA, 
 			}
 		}
 
+		genStart := time.Now()
 		manifestGenResult, err = GenerateManifests(ctx, opContext.appPath, repoRoot, commitSHA, q, false, s.gitCredsStore, s.initConstants.MaxCombinedDirectoryManifestsSize, s.gitRepoPaths, WithCMPTarDoneChannel(ch.tarDoneCh), WithCMPTarExcludedGlobs(s.initConstants.CMPTarExcludedGlobs), WithCMPUseManifestGeneratePaths(s.initConstants.CMPUseManifestGeneratePaths))
+		genDur := time.Since(genStart)
+		log.WithFields(log.Fields{
+			"application": q.AppName,
+			"duration_ms": genDur.Milliseconds(),
+			"appPath":     opContext.appPath,
+			"debugTag":    "argo504debug",
+		}).Info("runManifestGenAsync: GenerateManifests completed")
+		if genDur > 10*time.Second {
+			log.WithFields(log.Fields{
+				"application": q.AppName,
+				"duration_ms": genDur.Milliseconds(),
+				"debugTag":    "argo504debug",
+			}).Info("runManifestGenAsync: GenerateManifests exceeded 10s")
+		}
 	}
 	refSourceCommitSHAs := make(map[string]string)
 	if len(repoRefs) > 0 {
@@ -1295,6 +1356,7 @@ func helmTemplate(appPath string, repoRoot string, env *v1alpha1.Env, q *apiclie
 		return nil, "", fmt.Errorf("error getting helm repos: %w", err)
 	}
 
+	helmLogCtx := log.WithFields(log.Fields{"application": q.AppName, "appPath": appPath, "debugTag": "argo504debug"})
 	h, err := helm.NewHelmApp(appPath, helmRepos, isLocal, version, proxy, q.Repo.NoProxy, passCredentials)
 	if err != nil {
 		return nil, "", fmt.Errorf("error initializing helm app object: %w", err)
@@ -1302,13 +1364,22 @@ func helmTemplate(appPath string, repoRoot string, env *v1alpha1.Env, q *apiclie
 
 	defer h.Dispose()
 
+	helmTemplateStart := time.Now()
 	out, command, err := h.Template(templateOpts)
+	helmTemplateDur := time.Since(helmTemplateStart)
+	helmLogCtx.WithField("duration_ms", helmTemplateDur.Milliseconds()).Info("helmTemplate: first h.Template call completed")
 	if err != nil {
 		if !helm.IsMissingDependencyErr(err) {
 			return nil, "", err
 		}
 
+		depBuildStart := time.Now()
 		err = runHelmBuild(appPath, h)
+		depBuildDur := time.Since(depBuildStart)
+		helmLogCtx.WithField("duration_ms", depBuildDur.Milliseconds()).Info("helmTemplate: runHelmBuild (dependency build) completed")
+		if depBuildDur > 5*time.Second {
+			helmLogCtx.WithField("duration_ms", depBuildDur.Milliseconds()).Info("helmTemplate: runHelmBuild exceeded 5s")
+		}
 		if err != nil {
 			var reposNotPermitted []string
 			// We do a sanity check here to give a nicer error message in case any of the Helm repositories are not permitted by
@@ -1331,11 +1402,20 @@ func helmTemplate(appPath string, repoRoot string, env *v1alpha1.Env, q *apiclie
 			return nil, "", err
 		}
 
+		retryTemplateStart := time.Now()
 		out, command, err = h.Template(templateOpts)
+		retryTemplateDur := time.Since(retryTemplateStart)
+		helmLogCtx.WithField("duration_ms", retryTemplateDur.Milliseconds()).Info("helmTemplate: retry h.Template after dep build completed")
 		if err != nil {
 			return nil, "", err
 		}
 	}
+
+	helmTotalDur := time.Since(helmTemplateStart)
+	if helmTotalDur > 10*time.Second {
+		helmLogCtx.WithField("duration_ms", helmTotalDur.Milliseconds()).Info("helmTemplate: total helm processing exceeded 10s")
+	}
+
 	objs, err := kube.SplitYAML([]byte(out))
 
 	redactedCommand := redactPaths(command, gitRepoPaths, templateOpts.ExtraValues)
@@ -1496,6 +1576,9 @@ func WithCMPUseManifestGeneratePaths(enabled bool) GenerateManifestOpt {
 
 // GenerateManifests generates manifests from a path. Overrides are applied as a side effect on the given ApplicationSource.
 func GenerateManifests(ctx context.Context, appPath, repoRoot, revision string, q *apiclient.ManifestRequest, isLocal bool, gitCredsStore git.CredsStore, maxCombinedManifestQuantity resource.Quantity, gitRepoPaths utilio.TempPaths, opts ...GenerateManifestOpt) (*apiclient.ManifestResponse, error) {
+	genLogCtx := log.WithFields(log.Fields{"application": q.AppName, "debugTag": "argo504debug"})
+	overallStart := time.Now()
+
 	opt := newGenerateManifestOpt(opts...)
 	var targetObjs []*unstructured.Unstructured
 
@@ -1503,10 +1586,17 @@ func GenerateManifests(ctx context.Context, appPath, repoRoot, revision string, 
 
 	env := newEnv(q, revision)
 
+	sourceTypeStart := time.Now()
 	appSourceType, err := GetAppSourceType(ctx, q.ApplicationSource, appPath, repoRoot, q.AppName, q.EnabledSourceTypes, opt.cmpTarExcludedGlobs, env.Environ())
+	sourceTypeDur := time.Since(sourceTypeStart)
+	if sourceTypeDur > 2*time.Second {
+		genLogCtx.WithFields(log.Fields{"duration_ms": sourceTypeDur.Milliseconds(), "sourceType": appSourceType}).Info("GenerateManifests: GetAppSourceType was slow")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("error getting app source type: %w", err)
 	}
+	genLogCtx.WithFields(log.Fields{"sourceType": appSourceType}).Info("GenerateManifests: detected source type")
+
 	repoURL := ""
 	if q.Repo != nil {
 		repoURL = q.Repo.Repo
@@ -1514,6 +1604,7 @@ func GenerateManifests(ctx context.Context, appPath, repoRoot, revision string, 
 
 	var commands []string
 
+	renderStart := time.Now()
 	switch appSourceType {
 	case v1alpha1.ApplicationSourceTypeHelm:
 		var command string
@@ -1552,6 +1643,19 @@ func GenerateManifests(ctx context.Context, appPath, repoRoot, revision string, 
 		}
 		logCtx := log.WithField("application", q.AppName)
 		targetObjs, err = findManifests(logCtx, appPath, repoRoot, env, *directory, q.EnabledSourceTypes, maxCombinedManifestQuantity)
+	}
+	renderDur := time.Since(renderStart)
+	genLogCtx.WithFields(log.Fields{
+		"duration_ms": renderDur.Milliseconds(),
+		"sourceType":  appSourceType,
+		"source":      repoURL,
+		"path":        q.ApplicationSource.Path,
+	}).Info("GenerateManifests: manifest rendering completed")
+	if renderDur > 10*time.Second {
+		genLogCtx.WithFields(log.Fields{
+			"duration_ms": renderDur.Milliseconds(),
+			"sourceType":  appSourceType,
+		}).Info("GenerateManifests: manifest rendering exceeded 10s")
 	}
 	if err != nil {
 		return nil, err
@@ -1596,6 +1700,20 @@ func GenerateManifests(ctx context.Context, appPath, repoRoot, revision string, 
 			}
 			manifests = append(manifests, string(manifestStr))
 		}
+	}
+
+	totalGenDur := time.Since(overallStart)
+	genLogCtx.WithFields(log.Fields{
+		"duration_ms":    totalGenDur.Milliseconds(),
+		"sourceType":     appSourceType,
+		"manifestCount":  len(manifests),
+		"targetObjCount": len(targetObjs),
+	}).Info("GenerateManifests: total completed (render + marshal)")
+	if totalGenDur > 10*time.Second {
+		genLogCtx.WithFields(log.Fields{
+			"duration_ms": totalGenDur.Milliseconds(),
+			"sourceType":  appSourceType,
+		}).Info("GenerateManifests: total exceeded 10s")
 	}
 
 	return &apiclient.ManifestResponse{
@@ -2093,6 +2211,9 @@ func getPluginParamEnvs(envVars []string, plugin *v1alpha1.ApplicationSourcePlug
 }
 
 func runConfigManagementPluginSidecars(ctx context.Context, appPath, repoPath, pluginName string, envVars *v1alpha1.Env, q *apiclient.ManifestRequest, creds git.Creds, tarDoneCh chan<- bool, tarExcludedGlobs []string, useManifestGeneratePaths bool) ([]*unstructured.Unstructured, error) {
+	cmpLogCtx := log.WithFields(log.Fields{"application": q.AppName, "plugin": pluginName, "debugTag": "argo504debug"})
+	cmpTotalStart := time.Now()
+
 	// compute variables.
 	env, err := getPluginEnvs(envVars, q)
 	if err != nil {
@@ -2100,7 +2221,10 @@ func runConfigManagementPluginSidecars(ctx context.Context, appPath, repoPath, p
 	}
 
 	// detect config management plugin server
+	detectStart := time.Now()
 	conn, cmpClient, err := discovery.DetectConfigManagementPlugin(ctx, appPath, repoPath, pluginName, env, tarExcludedGlobs)
+	detectDur := time.Since(detectStart)
+	cmpLogCtx.WithField("duration_ms", detectDur.Milliseconds()).Info("CMP: DetectConfigManagementPlugin completed")
 	if err != nil {
 		return nil, err
 	}
@@ -2130,7 +2254,13 @@ func runConfigManagementPluginSidecars(ctx context.Context, appPath, repoPath, p
 	}
 
 	// generate manifests using commands provided in plugin config file in detected cmp-server sidecar
+	cmpGenStart := time.Now()
 	cmpManifests, err := generateManifestsCMP(ctx, appPath, rootPath, env, cmpClient, tarDoneCh, tarExcludedGlobs)
+	cmpGenDur := time.Since(cmpGenStart)
+	cmpLogCtx.WithField("duration_ms", cmpGenDur.Milliseconds()).Info("CMP: generateManifestsCMP (tar + stream + generate) completed")
+	if cmpGenDur > 10*time.Second {
+		cmpLogCtx.WithField("duration_ms", cmpGenDur.Milliseconds()).Info("CMP: generateManifestsCMP exceeded 10s")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("error generating manifests in cmp: %w", err)
 	}
@@ -2146,6 +2276,12 @@ func runConfigManagementPluginSidecars(ctx context.Context, appPath, repoPath, p
 			return nil, fmt.Errorf("failed to convert CMP manifests to unstructured objects: %s", err.Error())
 		}
 		manifests = append(manifests, manifestObjs...)
+	}
+
+	cmpTotalDur := time.Since(cmpTotalStart)
+	cmpLogCtx.WithField("duration_ms", cmpTotalDur.Milliseconds()).Info("CMP: total runConfigManagementPluginSidecars completed")
+	if cmpTotalDur > 10*time.Second {
+		cmpLogCtx.WithField("duration_ms", cmpTotalDur.Milliseconds()).Info("CMP: total runConfigManagementPluginSidecars exceeded 10s")
 	}
 	return manifests, nil
 }

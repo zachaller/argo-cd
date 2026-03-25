@@ -131,7 +131,7 @@ func ErrorCodeK8sUnaryServerInterceptor() grpc.UnaryServerInterceptor {
 				"duration_ms": dur.Milliseconds(),
 				"error":       err.Error(),
 				"debugTag":    "argo504debug",
-			}).Warn("K8s timeout/unavailable error in gRPC handler, may cause ALB 504")
+			}).Info("K8s timeout/unavailable error in gRPC handler, may cause ALB 504")
 		}
 		if dur > 30*time.Second {
 			log.WithFields(log.Fields{
@@ -139,7 +139,7 @@ func ErrorCodeK8sUnaryServerInterceptor() grpc.UnaryServerInterceptor {
 				"duration_ms": dur.Milliseconds(),
 				"hasError":    err != nil,
 				"debugTag":    "argo504debug",
-			}).Warn("gRPC handler exceeded 30s, high risk of ALB 504")
+			}).Info("gRPC handler exceeded 30s, high risk of ALB 504")
 		}
 		return resp, kubeErrToGRPC(err)
 	}

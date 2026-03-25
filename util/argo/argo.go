@@ -393,7 +393,7 @@ func ValidateRepo(
 		logCtx.WithFields(log.Fields{
 			"duration_ms": versionDur.Milliseconds(),
 			"destination": spec.Destination.Server,
-		}).Warn("GetServerVersion exceeded 5s for destination cluster")
+		}).Info("GetServerVersion exceeded 5s for destination cluster")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("error getting k8s server version: %w", err)
@@ -441,7 +441,7 @@ func ValidateRepo(
 	repoValidateDur := time.Since(repoValidateStart)
 	logCtx.WithFields(log.Fields{"duration_ms": repoValidateDur.Milliseconds()}).Info("validateRepo (TestRepository + GenerateManifest) completed")
 	if repoValidateDur > 10*time.Second {
-		logCtx.WithFields(log.Fields{"duration_ms": repoValidateDur.Milliseconds()}).Warn("validateRepo (TestRepository + GenerateManifest) exceeded 10s")
+		logCtx.WithFields(log.Fields{"duration_ms": repoValidateDur.Milliseconds()}).Info("validateRepo (TestRepository + GenerateManifest) exceeded 10s")
 	}
 	if err != nil {
 		return nil, err
@@ -507,12 +507,14 @@ func validateRepo(ctx context.Context,
 		logCtx.WithFields(log.Fields{
 			"duration_ms": testRepoDur.Milliseconds(),
 			"repo":        repo.StringForLogging(),
+			"debugTag":    "argo504debug",
 		}).Info("TestRepository call to repo-server completed")
 		if testRepoDur > 10*time.Second {
 			logCtx.WithFields(log.Fields{
 				"duration_ms": testRepoDur.Milliseconds(),
 				"repo":        repo.StringForLogging(),
-			}).Warn("TestRepository call to repo-server exceeded 10s")
+				"debugTag":    "argo504debug",
+			}).Info("TestRepository call to repo-server exceeded 10s")
 		}
 		repoAccessible := false
 
@@ -950,14 +952,16 @@ func verifyGenerateManifests(
 			"source":      source.RepoURL,
 			"path":        source.Path,
 			"duration_ms": genDur.Milliseconds(),
-		}).Info("GenerateManifest call to repo-server completed")
+			"debugTag":    "argo504debug",
+		}).Info("GenerateManifest gRPC call to repo-server completed")
 		if genDur > 10*time.Second {
 			log.WithFields(log.Fields{
 				"application": app.QualifiedName(),
 				"source":      source.RepoURL,
 				"path":        source.Path,
 				"duration_ms": genDur.Milliseconds(),
-			}).Warn("GenerateManifest call to repo-server exceeded 10s")
+				"debugTag":    "argo504debug",
+			}).Info("GenerateManifest gRPC call to repo-server exceeded 10s, risk of ALB 504")
 		}
 		if err != nil {
 			errMessage := fmt.Sprintf("Unable to generate manifests in %s: %s", source.Path, err)
@@ -1135,7 +1139,7 @@ func GetDestinationCluster(ctx context.Context, destination argoappv1.Applicatio
 				"duration_ms": dur.Milliseconds(),
 				"destination": destination.Server,
 				"debugTag":    "argo504debug",
-			}).Warn("GetDestinationCluster db.GetCluster by server was slow")
+			}).Info("GetDestinationCluster db.GetCluster by server was slow")
 		}
 		if err != nil {
 			return nil, fmt.Errorf("error getting cluster by server %q: %w", destination.Server, err)
@@ -1159,7 +1163,7 @@ func GetDestinationCluster(ctx context.Context, destination argoappv1.Applicatio
 				"duration_ms": dur.Milliseconds(),
 				"destination": destination.Name,
 				"debugTag":    "argo504debug",
-			}).Warn("GetDestinationCluster db.GetCluster by name was slow")
+			}).Info("GetDestinationCluster db.GetCluster by name was slow")
 		}
 		if err != nil {
 			return nil, fmt.Errorf("error getting cluster by URL: %w", err)
