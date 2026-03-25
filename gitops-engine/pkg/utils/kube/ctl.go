@@ -75,10 +75,10 @@ func (k *KubectlCmd) filterAPIResources(config *rest.Config, preferred bool, res
 
 	if err != nil {
 		if len(serverResources) == 0 {
-			k.Log.Error(err, "Server resource discovery failed completely", "host", config.Host, "duration", discoDur.String(), "debugTag", "argo504debug")
+			k.Log.Info("Server resource discovery failed completely", "host", config.Host, "duration", discoDur.String(), "error", err.Error(), "debugTag", "argo504debug")
 			return nil, fmt.Errorf("failed to discover server resources, zero resources returned: %w", err)
 		}
-		k.Log.Error(err, "Partial success when performing preferred resource discovery", "host", config.Host, "duration", discoDur.String(), "debugTag", "argo504debug")
+		k.Log.Info("Partial success when performing preferred resource discovery", "host", config.Host, "duration", discoDur.String(), "error", err.Error(), "debugTag", "argo504debug")
 	}
 	if discoDur > 5*time.Second {
 		k.Log.Info("API resource discovery was slow on destination cluster", "host", config.Host, "duration", discoDur.String(), "resourceGroupCount", len(serverResources), "debugTag", "argo504debug")
@@ -357,7 +357,7 @@ func (k *KubectlCmd) GetServerVersion(config *rest.Config) (string, error) {
 	v, err := client.ServerVersion()
 	dur := time.Since(start)
 	if err != nil {
-		k.Log.Error(err, "GetServerVersion failed", "host", config.Host, "duration", dur.String(), "debugTag", "argo504debug")
+		k.Log.Info("GetServerVersion failed", "host", config.Host, "duration", dur.String(), "error", err.Error(), "debugTag", "argo504debug")
 		return "", fmt.Errorf("failed to get server version: %w", err)
 	}
 	if dur > 5*time.Second {

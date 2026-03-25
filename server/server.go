@@ -1568,7 +1568,7 @@ func (server *ArgoCDServer) getClaims(ctx context.Context) (jwt.Claims, string, 
 	claims, newToken, err := server.sessionMgr.VerifyToken(ctx, tokenString)
 	verifyDur := time.Since(verifyStart)
 	if verifyDur > 2*time.Second {
-		log.WithFields(log.Fields{"duration": verifyDur.String(), "debugTag": "argo504debug"}).Warn("VerifyToken was slow")
+		log.WithFields(log.Fields{"duration": verifyDur.String(), "debugTag": "argo504debug"}).Info("VerifyToken was slow")
 	}
 	if err != nil {
 		return claims, "", status.Errorf(codes.Unauthenticated, "invalid session: %v", err)
@@ -1585,7 +1585,7 @@ func (server *ArgoCDServer) getClaims(ctx context.Context) (jwt.Claims, string, 
 				"duration": userInfoDur.String(),
 				"sub":      jwtutil.StringField(claims.(jwt.MapClaims), "sub"),
 				"debugTag": "argo504debug",
-			}).Warn("SetGroupsFromUserInfo (IDP userinfo) was slow")
+			}).Info("SetGroupsFromUserInfo (IDP userinfo) was slow")
 		}
 		if err != nil {
 			return claims, "", status.Errorf(codes.Unauthenticated, "invalid session: %v", err)
@@ -1600,7 +1600,7 @@ func (server *ArgoCDServer) getClaims(ctx context.Context) (jwt.Claims, string, 
 				"duration": refreshDur.String(),
 				"sub":      jwtutil.StringField(updatedClaims, "sub"),
 				"debugTag": "argo504debug",
-			}).Warn("CheckAndRefreshToken (IDP token endpoint) was slow")
+			}).Info("CheckAndRefreshToken (IDP token endpoint) was slow")
 		}
 		if err != nil {
 			log.Errorf("error checking and refreshing token: %v", err)
@@ -1613,7 +1613,7 @@ func (server *ArgoCDServer) getClaims(ctx context.Context) (jwt.Claims, string, 
 
 	totalDur := time.Since(getClaimsStart)
 	if totalDur > 5*time.Second {
-		log.WithFields(log.Fields{"duration": totalDur.String(), "debugTag": "argo504debug"}).Warn("getClaims total time exceeded 5s, risk of ALB 504")
+		log.WithFields(log.Fields{"duration": totalDur.String(), "debugTag": "argo504debug"}).Info("getClaims total time exceeded 5s, risk of ALB 504")
 	}
 
 	return finalClaims, newToken, nil
