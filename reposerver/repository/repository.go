@@ -473,9 +473,9 @@ func (s *Service) runRepoOperation(
 		return s.checkoutRevision(gitClient, revision, s.initConstants.SubmoduleEnabled, repo.Depth)
 	})
 	lockDur := time.Since(lockStart)
-	repoOpLogCtx.WithField("duration_ms", lockDur.Milliseconds()).Info("runRepoOperation: git repoLock.Lock + checkout completed")
+	repoOpLogCtx.WithFields(log.Fields{"duration_ms": lockDur.Milliseconds(), "allowConcurrent": settings.allowConcurrent}).Info("runRepoOperation: git repoLock.Lock + checkout completed")
 	if lockDur > 5*time.Second {
-		repoOpLogCtx.WithField("duration_ms", lockDur.Milliseconds()).Info("runRepoOperation: git lock/checkout exceeded 5s")
+		repoOpLogCtx.WithFields(log.Fields{"duration_ms": lockDur.Milliseconds(), "allowConcurrent": settings.allowConcurrent}).Warn("runRepoOperation: git lock/checkout exceeded 5s")
 	}
 	if err != nil {
 		return err

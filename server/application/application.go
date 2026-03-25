@@ -779,8 +779,11 @@ func (s *Server) GetManifestsWithFiles(stream application.ApplicationService_Get
 
 // Get returns an application by name
 func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1alpha1.Application, error) {
+	getStart := time.Now()
 	appName := q.GetName()
 	appNs := s.appNamespaceOrDefault(q.GetAppNamespace())
+	logCtx := log.WithFields(log.Fields{"application": appName, "app-namespace": appNs, "debugTag": "argo504debug"})
+	logCtx.Info("Get handler started")
 
 	project := ""
 	projects := getProjectsFromApplicationQuery(*q)
@@ -793,13 +796,20 @@ func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1a
 	// We must use a client Get instead of an informer Get, because it's common to call Get immediately
 	// following a Watch (which is not yet powered by an informer), and the Get must reflect what was
 	// previously seen by the client.
+	k8sGetStart := time.Now()
 	a, proj, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionGet, project, appNs, appName, q.GetResourceVersion())
+	k8sGetDur := time.Since(k8sGetStart)
+	logCtx.WithField("duration_ms", k8sGetDur.Milliseconds()).Info("Get: k8s Application.Get + RBAC completed")
+	if k8sGetDur > 2*time.Second {
+		logCtx.WithField("duration_ms", k8sGetDur.Milliseconds()).Info("Get: k8s Application.Get + RBAC was slow")
+	}
 	if err != nil {
 		return nil, err
 	}
 
 	if q.Refresh == nil {
 		s.inferResourcesStatusHealth(a)
+		logCtx.WithField("total_duration_ms", time.Since(getStart).Milliseconds()).Info("Get handler completed (no refresh)")
 		return a.DeepCopy(), nil
 	}
 
@@ -807,6 +817,7 @@ func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1a
 	if *q.Refresh == string(v1alpha1.RefreshTypeHard) {
 		refreshType = v1alpha1.RefreshTypeHard
 	}
+	logCtx.WithField("refreshType", string(refreshType)).Info("Get: refresh requested")
 	appIf := s.appclientset.ArgoprojV1alpha1().Applications(appNs)
 
 	// subscribe early with buffered channel to ensure we don't miss events
@@ -816,12 +827,19 @@ func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1a
 	})
 	defer unsubscribe()
 
+	refreshStart := time.Now()
 	app, err := argo.RefreshApp(appIf, appName, refreshType, true)
+	refreshDur := time.Since(refreshStart)
+	logCtx.WithField("duration_ms", refreshDur.Milliseconds()).Info("Get: RefreshApp (k8s Patch) completed")
+	if refreshDur > 2*time.Second {
+		logCtx.WithField("duration_ms", refreshDur.Milliseconds()).Info("Get: RefreshApp (k8s Patch) was slow")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("error refreshing the app: %w", err)
 	}
 
 	if refreshType == v1alpha1.RefreshTypeHard {
+		hardRefreshStart := time.Now()
 		// force refresh cached application details
 		if err := s.queryRepoServer(ctx, proj, func(
 			client apiclient.RepoServerServiceClient,
@@ -860,6 +878,11 @@ func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1a
 		}); err != nil {
 			log.Warnf("Failed to force refresh application details: %v", err)
 		}
+		hardRefreshDur := time.Since(hardRefreshStart)
+		logCtx.WithField("duration_ms", hardRefreshDur.Milliseconds()).Info("Get: hard refresh queryRepoServer (GetAppDetails) completed")
+		if hardRefreshDur > 5*time.Second {
+			logCtx.WithField("duration_ms", hardRefreshDur.Milliseconds()).Info("Get: hard refresh queryRepoServer exceeded 5s")
+		}
 	}
 
 	minVersion := 0
@@ -867,9 +890,16 @@ func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1a
 		minVersion = 0
 	}
 
+	waitStart := time.Now()
+	logCtx.Info("Get: entering wait loop for controller reconciliation")
 	for {
 		select {
 		case <-ctx.Done():
+			waitDur := time.Since(waitStart)
+			logCtx.WithFields(log.Fields{
+				"wait_duration_ms":  waitDur.Milliseconds(),
+				"total_duration_ms": time.Since(getStart).Milliseconds(),
+			}).Info("Get: refresh deadline exceeded (context cancelled in wait loop)")
 			return nil, errors.New("application refresh deadline exceeded")
 		case event := <-events:
 			if appVersion, err := strconv.Atoi(event.Application.ResourceVersion); err == nil && appVersion > minVersion {
@@ -878,8 +908,20 @@ func (s *Server) Get(ctx context.Context, q *application.ApplicationQuery) (*v1a
 					annotations = make(map[string]string)
 				}
 				if _, ok := annotations[v1alpha1.AnnotationKeyRefresh]; !ok {
+					waitDur := time.Since(waitStart)
+					logCtx.WithFields(log.Fields{
+						"wait_duration_ms":  waitDur.Milliseconds(),
+						"total_duration_ms": time.Since(getStart).Milliseconds(),
+					}).Info("Get: controller reconciliation completed (refresh annotation removed)")
+					if waitDur > 10*time.Second {
+					logCtx.WithFields(log.Fields{
+						"wait_duration_ms":  waitDur.Milliseconds(),
+						"total_duration_ms": time.Since(getStart).Milliseconds(),
+					}).Info("Get: controller reconciliation wait exceeded 10s, risk of ALB 504")
+					}
 					refreshedApp := event.Application.DeepCopy()
 					s.inferResourcesStatusHealth(refreshedApp)
+					logCtx.WithField("total_duration_ms", time.Since(getStart).Milliseconds()).Info("Get handler completed (with refresh)")
 					return refreshedApp, nil
 				}
 			}
