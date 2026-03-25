@@ -310,7 +310,6 @@ func ValidateRepo(
 ) ([]argoappv1.ApplicationCondition, error) {
 	spec := &app.Spec
 	logCtx := log.WithFields(log.Fields{"application": app.QualifiedName(), "debugTag": "argo504debug"})
-	validateRepoOverallStart := time.Now()
 
 	conditions := make([]argoappv1.ApplicationCondition, 0)
 
@@ -387,13 +386,13 @@ func ValidateRepo(
 	destCluster.ServerVersion, err = kubectl.GetServerVersion(config)
 	versionDur := time.Since(versionStart)
 	logCtx.WithFields(log.Fields{
-		"duration_ms":  versionDur.Milliseconds(),
-		"destination":  spec.Destination.Server,
+		"duration_ms": versionDur.Milliseconds(),
+		"destination": spec.Destination.Server,
 	}).Info("GetServerVersion completed for destination cluster")
 	if versionDur > 5*time.Second {
 		logCtx.WithFields(log.Fields{
-			"duration_ms":  versionDur.Milliseconds(),
-			"destination":  spec.Destination.Server,
+			"duration_ms": versionDur.Milliseconds(),
+			"destination": spec.Destination.Server,
 		}).Warn("GetServerVersion exceeded 5s for destination cluster")
 	}
 	if err != nil {
@@ -404,13 +403,13 @@ func ValidateRepo(
 	apiGroups, err := kubectl.GetAPIResources(config, false, cache.NewNoopSettings())
 	apiDur := time.Since(apiStart)
 	logCtx.WithFields(log.Fields{
-		"duration_ms":  apiDur.Milliseconds(),
-		"destination":  spec.Destination.Server,
+		"duration_ms": apiDur.Milliseconds(),
+		"destination": spec.Destination.Server,
 	}).Info("GetAPIResources completed for destination cluster")
 	if apiDur > 5*time.Second {
 		logCtx.WithFields(log.Fields{
-			"duration_ms":  apiDur.Milliseconds(),
-			"destination":  spec.Destination.Server,
+			"duration_ms": apiDur.Milliseconds(),
+			"destination": spec.Destination.Server,
 		}).Warn("GetAPIResources exceeded 5s for destination cluster")
 	}
 	if err != nil {
@@ -1133,9 +1132,9 @@ func GetDestinationCluster(ctx context.Context, destination argoappv1.Applicatio
 		dur := time.Since(start)
 		if dur > 2*time.Second {
 			log.WithFields(log.Fields{
-				"duration_ms":  dur.Milliseconds(),
-				"destination":  destination.Server,
-				"debugTag":     "argo504debug",
+				"duration_ms": dur.Milliseconds(),
+				"destination": destination.Server,
+				"debugTag":    "argo504debug",
 			}).Warn("GetDestinationCluster db.GetCluster by server was slow")
 		}
 		if err != nil {
@@ -1157,9 +1156,9 @@ func GetDestinationCluster(ctx context.Context, destination argoappv1.Applicatio
 		dur := time.Since(start)
 		if dur > 2*time.Second {
 			log.WithFields(log.Fields{
-				"duration_ms":  dur.Milliseconds(),
-				"destination":  destination.Name,
-				"debugTag":     "argo504debug",
+				"duration_ms": dur.Milliseconds(),
+				"destination": destination.Name,
+				"debugTag":    "argo504debug",
 			}).Warn("GetDestinationCluster db.GetCluster by name was slow")
 		}
 		if err != nil {

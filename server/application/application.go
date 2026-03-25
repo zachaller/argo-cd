@@ -1358,9 +1358,9 @@ func (s *Server) validateAndNormalizeApp(ctx context.Context, app *v1alpha1.Appl
 	destDur := time.Since(destStart)
 	if destDur > 2*time.Second {
 		logCtx.WithFields(log.Fields{
-			"duration_ms":  destDur.Milliseconds(),
-			"destination":  app.Spec.Destination.Server,
-			"debugTag":     "argo504debug",
+			"duration_ms": destDur.Milliseconds(),
+			"destination": app.Spec.Destination.Server,
+			"debugTag":    "argo504debug",
 		}).Warn("GetDestinationCluster (initial) was slow")
 	}
 
@@ -1372,9 +1372,9 @@ func (s *Server) validateAndNormalizeApp(ctx context.Context, app *v1alpha1.Appl
 		condition, err := argo.ValidateRepo(ctx, app, s.repoClientset, s.db, s.kubectl, proj, s.settingsMgr)
 		validateRepoDur := time.Since(validateRepoStart)
 		logCtx.WithFields(log.Fields{
-			"duration_ms":  validateRepoDur.Milliseconds(),
-			"destination":  app.Spec.Destination.Server,
-			"debugTag":     "argo504debug",
+			"duration_ms": validateRepoDur.Milliseconds(),
+			"destination": app.Spec.Destination.Server,
+			"debugTag":    "argo504debug",
 		}).Info("ValidateRepo completed")
 		if validateRepoDur > 10*time.Second {
 			logCtx.WithFields(log.Fields{"duration_ms": validateRepoDur.Milliseconds(), "debugTag": "argo504debug"}).Warn("ValidateRepo exceeded 10s, risk of ALB 504")
