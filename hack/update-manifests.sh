@@ -120,6 +120,11 @@ $KUSTOMIZE build "${SRCROOT}/manifests/ha/namespace-install" >> "${SRCROOT}/mani
 echo "${AUTOGENMSG}" > "${SRCROOT}/manifests/core-install.yaml"
 $KUSTOMIZE build "${SRCROOT}/manifests/core-install" >> "${SRCROOT}/manifests/core-install.yaml"
 
+# Multi-cluster aggregated apiserver. Install on a central cluster (without argoproj.io CRDs)
+# to present a unified, UI-facing view of Argo CD resources across all registered clusters.
+echo "${AUTOGENMSG}" > "${SRCROOT}/manifests/aggregator-install.yaml"
+$KUSTOMIZE build "${SRCROOT}/manifests/aggregator" >> "${SRCROOT}/manifests/aggregator-install.yaml"
+
 # Copies enabling manifest hydrator. These can be removed once the manifest hydrator is either removed or enabled by
 # default.
 

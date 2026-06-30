@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Namespaced resources intentionally omit metadata.namespace and are applied with
+# `kubectl apply -n argocd`, matching the other Argo CD install manifests. The kube-system
+# RoleBinding sets its namespace explicitly so it is not affected.
+resources:
+  - argocd-aggregator-sa.yaml
+  - argocd-aggregator-rbac.yaml
+  - argocd-aggregator-deployment.yaml
+  - argocd-aggregator-service.yaml
+  - argocd-aggregator-apiservice.yaml

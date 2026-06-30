@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: argocd-aggregator
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/component: aggregator
+  name: argocd-aggregator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-aggregator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: argocd-aggregator
+    spec:
+      serviceAccountName: argocd-aggregator
+      containers:
+        - name: argocd-aggregator
+          image: quay.io/argoproj/argocd:latest
+          imagePullPolicy: Always
+          args:
+            - /usr/local/bin/argocd-aggregator
+            - --secure-port=8443
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8443
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

@@ -33,6 +33,7 @@ const (
 	CommandK8sAuth                  = "argocd-k8s-auth"
 	CommandDex                      = "argocd-dex"
 	CommandRepoServer               = "argocd-repo-server"
+	CommandAggregator               = "argocd-aggregator"
 )
 
 // Default service addresses and URLS of Argo CD internal services
