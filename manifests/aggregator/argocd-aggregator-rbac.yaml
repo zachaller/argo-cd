@@ -1,0 +1,77 @@
+# Delegated authentication: allow the aggregator to create TokenReviews and
+# SubjectAccessReviews against the central kube-apiserver so it can authenticate and authorize
+# incoming requests using the central cluster's RBAC.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: argocd-aggregator-auth-delegator
+  labels:
+    app.kubernetes.io/name: argocd-aggregator
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/component: aggregator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: argocd-aggregator
+    namespace: argocd
+---
+# Allow the aggregator to read the requestheader CA configuration the kube-apiserver uses to
+# front extension apiservers.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-aggregator-extension-apiserver-authentication-reader
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: argocd-aggregator
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/component: aggregator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: argocd-aggregator
+    namespace: argocd
+---
+# Allow the aggregator to read Argo CD cluster secrets and settings so it can discover
+# downstream clusters and build clients for them.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: argocd-aggregator
+  labels:
+    app.kubernetes.io/name: argocd-aggregator
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/component: aggregator
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: argocd-aggregator
+  labels:
+    app.kubernetes.io/name: argocd-aggregator
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/component: aggregator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: argocd-aggregator
+subjects:
+  - kind: ServiceAccount
+    name: argocd-aggregator
+    namespace: argocd

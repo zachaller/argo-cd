@@ -1,0 +1,25 @@
+# Registers the aggregator as the owner of the argoproj.io/v1alpha1 group-version on this
+# central cluster. The cluster must NOT have the argoproj.io CRDs installed, otherwise the
+# CRD and this APIService would conflict.
+#
+# insecureSkipTLSVerify is used here so the aggregator can serve a self-signed certificate out
+# of the box. For production, provision a serving certificate (e.g. with cert-manager) and set
+# spec.caBundle instead.
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.argoproj.io
+  labels:
+    app.kubernetes.io/name: argocd-aggregator
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/component: aggregator
+spec:
+  group: argoproj.io
+  version: v1alpha1
+  groupPriorityMinimum: 1000
+  versionPriority: 15
+  insecureSkipTLSVerify: true
+  service:
+    name: argocd-aggregator
+    namespace: argocd
+    port: 443

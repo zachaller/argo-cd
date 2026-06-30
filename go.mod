@@ -302,9 +302,9 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/apiserver v0.36.1 // indirect
+	k8s.io/apiserver v0.36.1
 	k8s.io/cli-runtime v0.36.1 // indirect
-	k8s.io/component-base v0.36.1 // indirect
+	k8s.io/component-base v0.36.1
 	k8s.io/controller-manager v0.36.1 // indirect
 	k8s.io/gengo/v2 v2.0.0-20250922181213-ec3ebc5fd46b // indirect
 	k8s.io/kube-aggregator v0.36.1 // indirect
@@ -322,8 +322,23 @@ require (
 )
 
 require (
+	cel.dev/expr v0.25.1 // indirect
+	github.com/NYTimes/gziphandler v1.1.1 // indirect
+	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
+	github.com/coreos/go-semver v0.3.1 // indirect
+	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
+	github.com/google/cel-go v0.27.0 // indirect
 	github.com/google/go-github/v88 v88.0.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
+	go.etcd.io/etcd/api/v3 v3.6.8 // indirect
+	go.etcd.io/etcd/client/pkg/v3 v3.6.8 // indirect
+	go.etcd.io/etcd/client/v3 v3.6.8 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
+	go.uber.org/zap v1.27.1 // indirect
+	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
+	k8s.io/kms v0.36.1 // indirect
+	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.34.0 // indirect
 )
 
 replace (
