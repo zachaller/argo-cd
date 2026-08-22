@@ -2223,14 +2223,7 @@ func (ctrl *ApplicationController) refreshAppConditions(ctx context.Context, app
 	if err != nil {
 		errorConditions = append(errorConditions, ctrl.projectErrorToCondition(err, app))
 	} else {
-		multiDestinationEnabled, err := ctrl.settingsMgr.IsMultiDestinationEnabled()
-		if err != nil {
-			errorConditions = append(errorConditions, appv1.ApplicationCondition{
-				Type:    appv1.ApplicationConditionUnknownError,
-				Message: err.Error(),
-			})
-		}
-		errorConditions = append(errorConditions, argo.ValidateMultiDestinationDisabled(&app.Spec, multiDestinationEnabled)...)
+		errorConditions = append(errorConditions, argo.ValidateMultiDestinationGate(&app.Spec, ctrl.settingsMgr)...)
 
 		specConditions, err := argo.ValidatePermissions(ctx, &app.Spec, proj, ctrl.db)
 		if err != nil {

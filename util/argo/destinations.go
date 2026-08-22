@@ -83,6 +83,32 @@ func ValidateMultiDestinationDisabled(spec *argoappv1.ApplicationSpec, enabled b
 	}}
 }
 
+// MultiDestinationEnabledChecker reads the multi-destination feature gate. It is satisfied by
+// *settings.SettingsManager.
+type MultiDestinationEnabledChecker interface {
+	IsMultiDestinationEnabled() (bool, error)
+}
+
+// ValidateMultiDestinationGate reports whether an application may declare named destinations.
+//
+// The setting is only read when the application actually declares destinations, so an application
+// that does not use the feature never touches the settings ConfigMap and cannot be affected by a
+// transient failure reading it. A read failure for an application that does use the feature is
+// surfaced rather than silently treated as "disabled", which would reject a valid spec.
+func ValidateMultiDestinationGate(spec *argoappv1.ApplicationSpec, checker MultiDestinationEnabledChecker) []argoappv1.ApplicationCondition {
+	if !spec.HasMultipleDestinations() {
+		return nil
+	}
+	enabled, err := checker.IsMultiDestinationEnabled()
+	if err != nil {
+		return []argoappv1.ApplicationCondition{{
+			Type:    argoappv1.ApplicationConditionUnknownError,
+			Message: fmt.Sprintf("could not determine whether multiple destinations are enabled: %v", err),
+		}}
+	}
+	return ValidateMultiDestinationDisabled(spec, enabled)
+}
+
 // ValidateDestinationNames checks that every named destination has a usable, unique name. It does
 // not resolve clusters, so it is safe to call before the cluster database is reachable.
 func ValidateDestinationNames(destinations []argoappv1.NamedDestination) []string {

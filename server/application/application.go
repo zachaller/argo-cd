@@ -1379,11 +1379,7 @@ func (s *Server) validateAndNormalizeApp(ctx context.Context, app *v1alpha1.Appl
 		}
 	}
 
-	multiDestinationEnabled, err := s.settingsMgr.IsMultiDestinationEnabled()
-	if err != nil {
-		return fmt.Errorf("error checking whether multiple destinations are enabled: %w", err)
-	}
-	conditions = argo.ValidateMultiDestinationDisabled(&app.Spec, multiDestinationEnabled)
+	conditions = argo.ValidateMultiDestinationGate(&app.Spec, s.settingsMgr)
 	if len(conditions) > 0 {
 		return status.Errorf(codes.InvalidArgument, "application spec for %s is invalid: %s", app.Name, argo.FormatAppConditions(conditions))
 	}

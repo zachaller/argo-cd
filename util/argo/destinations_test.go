@@ -1,6 +1,7 @@
 package argo
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -291,4 +292,57 @@ func TestValidateMultiDestinationDisabled(t *testing.T) {
 	require.Len(t, conditions, 1)
 	assert.Equal(t, argoappv1.ApplicationConditionInvalidSpecError, conditions[0].Type)
 	assert.Contains(t, conditions[0].Message, "application.destinations.enabled")
+}
+
+// failingMultiDestinationChecker fails every read and records whether it was consulted.
+type failingMultiDestinationChecker struct{ called bool }
+
+func (c *failingMultiDestinationChecker) IsMultiDestinationEnabled() (bool, error) {
+	c.called = true
+	return false, errors.New("configmap unavailable")
+}
+
+type staticMultiDestinationChecker struct{ enabled bool }
+
+func (c staticMultiDestinationChecker) IsMultiDestinationEnabled() (bool, error) {
+	return c.enabled, nil
+}
+
+func TestValidateMultiDestinationGate(t *testing.T) {
+	t.Parallel()
+
+	withDests := &argoappv1.ApplicationSpec{
+		Destinations: []argoappv1.NamedDestination{{Name: "prod", Server: "https://prod"}},
+	}
+
+	t.Run("an application without named destinations never reads the setting", func(t *testing.T) {
+		t.Parallel()
+		// This is the point of the guard: a settings failure must not be able to affect
+		// applications that do not use the feature.
+		checker := &failingMultiDestinationChecker{}
+		assert.Empty(t, ValidateMultiDestinationGate(&argoappv1.ApplicationSpec{}, checker))
+		assert.False(t, checker.called, "settings must not be consulted")
+	})
+
+	t.Run("enabled", func(t *testing.T) {
+		t.Parallel()
+		assert.Empty(t, ValidateMultiDestinationGate(withDests, staticMultiDestinationChecker{enabled: true}))
+	})
+
+	t.Run("disabled", func(t *testing.T) {
+		t.Parallel()
+		conditions := ValidateMultiDestinationGate(withDests, staticMultiDestinationChecker{enabled: false})
+		require.Len(t, conditions, 1)
+		assert.Equal(t, argoappv1.ApplicationConditionInvalidSpecError, conditions[0].Type)
+		assert.Contains(t, conditions[0].Message, "application.destinations.enabled")
+	})
+
+	t.Run("a settings failure is surfaced, not silently read as disabled", func(t *testing.T) {
+		t.Parallel()
+		checker := &failingMultiDestinationChecker{}
+		conditions := ValidateMultiDestinationGate(withDests, checker)
+		require.Len(t, conditions, 1)
+		assert.Equal(t, argoappv1.ApplicationConditionUnknownError, conditions[0].Type)
+		assert.Contains(t, conditions[0].Message, "configmap unavailable")
+	})
 }
