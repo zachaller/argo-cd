@@ -141,7 +141,10 @@ type comparisonResult struct {
 	// entry.
 	perDestination map[string]*destinationComparison
 	destOrder      []string
-	appSourceType  v1alpha1.ApplicationSourceType
+	// resolvedDests maps destination name to its resolved cluster, so the sync stage does not have
+	// to resolve them again.
+	resolvedDests map[string]argo.ResolvedDestination
+	appSourceType v1alpha1.ApplicationSourceType
 	// appSourceTypes stores the SourceType for each application source under sources field
 	appSourceTypes []v1alpha1.ApplicationSourceType
 	// timings maps phases of comparison to the duration it took to complete (for statistical purposes)
@@ -1027,6 +1030,7 @@ func (m *appStateManager) CompareAppState(ctx context.Context, app *v1alpha1.App
 		diffConfig:              diffConfig,
 		perDestination:          perDestination,
 		destOrder:               destOrder,
+		resolvedDests:           resolvedDests,
 		diffResultList:          diffResults,
 		hasPostDeleteHooks:      hasPostDeleteHooks,
 		hasPreDeleteHooks:       hasPreDeleteHooks,

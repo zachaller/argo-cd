@@ -388,7 +388,7 @@ func TestSyncWindowDeniesSync(t *testing.T) {
 
 func TestNormalizeTargetResources(t *testing.T) {
 	type fixture struct {
-		comparisonResult *comparisonResult
+		comparisonResult *destinationComparison
 	}
 	setup := func(t *testing.T, ignores []v1alpha1.ResourceIgnoreDifferences) *fixture {
 		t.Helper()
@@ -400,7 +400,7 @@ func TestNormalizeTargetResources(t *testing.T) {
 		live := test.YamlToUnstructured(testdata.LiveDeploymentYaml)
 		target := test.YamlToUnstructured(testdata.TargetDeploymentYaml)
 		return &fixture{
-			&comparisonResult{
+			&destinationComparison{
 				reconciliationResult: sync.ReconciliationResult{
 					Live:   []*unstructured.Unstructured{live},
 					Target: []*unstructured.Unstructured{target},
@@ -545,7 +545,7 @@ func TestNormalizeTargetResources(t *testing.T) {
 
 func TestNormalizeTargetResourcesWithList(t *testing.T) {
 	type fixture struct {
-		comparisonResult *comparisonResult
+		comparisonResult *destinationComparison
 	}
 	setupHTTPProxy := func(t *testing.T, ignores []v1alpha1.ResourceIgnoreDifferences) *fixture {
 		t.Helper()
@@ -557,7 +557,7 @@ func TestNormalizeTargetResourcesWithList(t *testing.T) {
 		live := test.YamlToUnstructured(testdata.LiveHTTPProxy)
 		target := test.YamlToUnstructured(testdata.TargetHTTPProxy)
 		return &fixture{
-			&comparisonResult{
+			&destinationComparison{
 				reconciliationResult: sync.ReconciliationResult{
 					Live:   []*unstructured.Unstructured{live},
 					Target: []*unstructured.Unstructured{target},
@@ -778,7 +778,7 @@ func TestNormalizeTargetResourcesWithList(t *testing.T) {
 
 func TestNormalizeTargetResourcesCRDs(t *testing.T) {
 	type fixture struct {
-		comparisonResult *comparisonResult
+		comparisonResult *destinationComparison
 	}
 	setupHTTPProxy := func(t *testing.T, ignores []v1alpha1.ResourceIgnoreDifferences) *fixture {
 		t.Helper()
@@ -790,7 +790,7 @@ func TestNormalizeTargetResourcesCRDs(t *testing.T) {
 		live := test.YamlToUnstructured(testdata.SimpleAppLiveYaml)
 		target := test.YamlToUnstructured(testdata.SimpleAppTargetYaml)
 		return &fixture{
-			&comparisonResult{
+			&destinationComparison{
 				reconciliationResult: sync.ReconciliationResult{
 					Live:   []*unstructured.Unstructured{live},
 					Target: []*unstructured.Unstructured{target},
@@ -940,7 +940,7 @@ func TestNormalizeTargetResourcesCRDs(t *testing.T) {
 		// Load target child Application (desired state with chart version 0.45.29)
 		target := test.YamlToUnstructured(testdata.TargetChildApplicationYaml)
 
-		comparisonResult := &comparisonResult{
+		comparisonResult := &destinationComparison{
 			reconciliationResult: sync.ReconciliationResult{
 				Live:   []*unstructured.Unstructured{live},
 				Target: []*unstructured.Unstructured{target},
@@ -978,7 +978,7 @@ func TestNormalizeTargetResourcesCRDs(t *testing.T) {
 // RespectIgnoreDifferences=true is set, normalizeTargetResources should only patch the
 // ignored field — not clobber the entire selector due to patchStrategy:"replace".
 func TestNormalizeTargetResourcesPDBSelector(t *testing.T) {
-	setupPDB := func(t *testing.T, ignores []v1alpha1.ResourceIgnoreDifferences) *comparisonResult {
+	setupPDB := func(t *testing.T, ignores []v1alpha1.ResourceIgnoreDifferences) *destinationComparison {
 		t.Helper()
 		dc, err := diff.NewDiffConfigBuilder().
 			WithDiffSettings(ignores, nil, true, normalizers.IgnoreNormalizerOpts{}).
@@ -987,7 +987,7 @@ func TestNormalizeTargetResourcesPDBSelector(t *testing.T) {
 		require.NoError(t, err)
 		live := test.YamlToUnstructured(testdata.LivePDBYaml)
 		target := test.YamlToUnstructured(testdata.TargetPDBYaml)
-		return &comparisonResult{
+		return &destinationComparison{
 			reconciliationResult: sync.ReconciliationResult{
 				Live:   []*unstructured.Unstructured{live},
 				Target: []*unstructured.Unstructured{target},
@@ -2441,4 +2441,28 @@ func TestValidateSyncPermissions(t *testing.T) {
 
 		assert.NoError(t, err)
 	})
+}
+
+func TestMergeOperationPhase(t *testing.T) {
+	t.Parallel()
+
+	// An operation is only as successful as its least successful destination.
+	assert.Equal(t, synccommon.OperationError,
+		mergeOperationPhase(synccommon.OperationSucceeded, synccommon.OperationError))
+	assert.Equal(t, synccommon.OperationError,
+		mergeOperationPhase(synccommon.OperationFailed, synccommon.OperationError))
+	assert.Equal(t, synccommon.OperationFailed,
+		mergeOperationPhase(synccommon.OperationRunning, synccommon.OperationFailed))
+	assert.Equal(t, synccommon.OperationRunning,
+		mergeOperationPhase(synccommon.OperationSucceeded, synccommon.OperationRunning))
+
+	// Succeeded only survives when every destination succeeded.
+	assert.Equal(t, synccommon.OperationSucceeded,
+		mergeOperationPhase(synccommon.OperationSucceeded, synccommon.OperationSucceeded))
+
+	// The zero phase means "nothing merged yet" and must never win.
+	assert.Equal(t, synccommon.OperationSucceeded,
+		mergeOperationPhase("", synccommon.OperationSucceeded))
+	assert.Equal(t, synccommon.OperationError,
+		mergeOperationPhase("", synccommon.OperationError))
 }

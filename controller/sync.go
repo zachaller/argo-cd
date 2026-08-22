@@ -8,6 +8,7 @@ import (
 	"os"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
@@ -290,18 +291,14 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 
 	start := time.Now()
 
-	outcome, ok := m.syncDestination(ctx, app, project, state, compareResult, syncOp, syncSettings{
-		resourceOverrides:      resourceOverrides,
-		prunePropagationPolicy: prunePropagationPolicy,
-		clientSideApplyManager: clientSideApplyManager,
-		installationID:         installationID,
-		trackingMethod:         trackingMethod,
-		initialResourcesRes:    initialResourcesRes,
-	}, logEntry)
-	if !ok {
-		return
+	// Group the results of the previous pass by destination. Nothing survives in memory between
+	// passes -- the controller rebuilds every sync context each reconcile -- so a destination's
+	// progress is recovered solely from what it recorded on the operation last time. Handing a
+	// context another destination's results would make it re-apply everything.
+	initialByDest := make(map[string][]common.ResourceSyncResult, len(compareResult.destOrder))
+	for i, res := range state.SyncResult.Resources {
+		initialByDest[res.Destination] = append(initialByDest[res.Destination], initialResourcesRes[i])
 	}
-	resState, destCluster, logEntry := outcome.resources, outcome.cluster, outcome.logEntry
 
 	state.SyncResult.Resources = nil
 
@@ -309,38 +306,84 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 		state.SyncResult.ManagedNamespaceMetadata = app.Spec.SyncPolicy.ManagedNamespaceMetadata
 	}
 
-	var apiVersion []kube.APIResourceInfo
-	for _, res := range resState {
-		augmentedMsg, err := argo.AugmentSyncMsg(res, func() ([]kube.APIResourceInfo, error) {
-			if apiVersion == nil {
-				_, apiVersion, err = m.liveStateCache.GetVersionsInfo(destCluster)
-				if err != nil {
-					return nil, fmt.Errorf("failed to get version info from the target cluster %q", destCluster.Server)
-				}
-			}
-			return apiVersion, nil
-		})
+	var (
+		mergedPhase    common.OperationPhase
+		mergedMessages []string
+	)
 
-		if err != nil {
-			log.Errorf("using the original message since: %v", err)
-		} else {
-			res.Message = augmentedMsg
+	for _, destName := range compareResult.destOrder {
+		dest, ok := compareResult.resolvedDests[destName]
+		if !ok {
+			continue
+		}
+		dc, ok := compareResult.perDestination[destName]
+		if !ok {
+			continue
 		}
 
-		state.SyncResult.Resources = append(state.SyncResult.Resources, &v1alpha1.ResourceResult{
-			HookType:  res.HookType,
-			Group:     res.ResourceKey.Group,
-			Kind:      res.ResourceKey.Kind,
-			Namespace: res.ResourceKey.Namespace,
-			Name:      res.ResourceKey.Name,
-			Version:   res.Version,
-			SyncPhase: res.SyncPhase,
-			HookPhase: res.HookPhase,
-			Status:    res.Status,
-			Message:   res.Message,
-			Images:    res.Images,
-		})
+		ss := syncSettings{
+			resourceOverrides:      resourceOverrides,
+			prunePropagationPolicy: prunePropagationPolicy,
+			clientSideApplyManager: clientSideApplyManager,
+			installationID:         installationID,
+			trackingMethod:         trackingMethod,
+			initialResourcesRes:    initialByDest[destName],
+		}
+
+		outcome, ok := m.syncDestination(ctx, app, project, state, compareResult, dest, dc, syncOp, ss, logEntry)
+		if !ok {
+			// syncDestination has already recorded a terminal state on the operation.
+			return
+		}
+		logEntry = outcome.logEntry
+		destCluster := outcome.cluster
+
+		mergedPhase = mergeOperationPhase(mergedPhase, state.Phase)
+		if state.Message != "" {
+			if len(compareResult.destOrder) > 1 && destName != argo.PrimaryDestinationName {
+				mergedMessages = append(mergedMessages, fmt.Sprintf("[%s] %s", destName, state.Message))
+			} else {
+				mergedMessages = append(mergedMessages, state.Message)
+			}
+		}
+
+		var apiVersion []kube.APIResourceInfo
+		for _, res := range outcome.resources {
+			augmentedMsg, err := argo.AugmentSyncMsg(res, func() ([]kube.APIResourceInfo, error) {
+				if apiVersion == nil {
+					_, apiVersion, err = m.liveStateCache.GetVersionsInfo(destCluster)
+					if err != nil {
+						return nil, fmt.Errorf("failed to get version info from the target cluster %q", destCluster.Server)
+					}
+				}
+				return apiVersion, nil
+			})
+
+			if err != nil {
+				log.Errorf("using the original message since: %v", err)
+			} else {
+				res.Message = augmentedMsg
+			}
+
+			state.SyncResult.Resources = append(state.SyncResult.Resources, &v1alpha1.ResourceResult{
+				HookType:    res.HookType,
+				Group:       res.ResourceKey.Group,
+				Kind:        res.ResourceKey.Kind,
+				Namespace:   res.ResourceKey.Namespace,
+				Name:        res.ResourceKey.Name,
+				Version:     res.Version,
+				SyncPhase:   res.SyncPhase,
+				HookPhase:   res.HookPhase,
+				Status:      res.Status,
+				Message:     res.Message,
+				Images:      res.Images,
+				Destination: destName,
+			})
+		}
 	}
+
+	state.Phase = mergedPhase
+	state.Message = strings.Join(mergedMessages, "; ")
 
 	logEntry.WithField("duration", time.Since(start)).Info("sync/terminate complete")
 
@@ -357,7 +400,35 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 //   - applies normalization to the target resources based on the live resources
 //   - copies ignored fields from the matching live resources: apply normalizer to the live resource,
 //     calculates the patch performed by normalizer and applies the patch to the target resource
-func normalizeTargetResources(openAPISchema openapi.Resources, cr *comparisonResult) ([]*unstructured.Unstructured, error) {
+//
+// operationPhaseRank orders phases from most to least successful, so that merging keeps the worst.
+func operationPhaseRank(p common.OperationPhase) int {
+	switch p {
+	case common.OperationError:
+		return 5
+	case common.OperationFailed:
+		return 4
+	case common.OperationTerminating:
+		return 3
+	case common.OperationRunning:
+		return 2
+	case common.OperationSucceeded:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// mergeOperationPhase combines one destination's phase into the operation's overall phase, keeping
+// the least successful of the two. An application is only Succeeded when every destination is.
+func mergeOperationPhase(a, b common.OperationPhase) common.OperationPhase {
+	if operationPhaseRank(b) > operationPhaseRank(a) {
+		return b
+	}
+	return a
+}
+
+func normalizeTargetResources(openAPISchema openapi.Resources, cr *destinationComparison) ([]*unstructured.Unstructured, error) {
 	// Normalize live and target resources (cleaning or aligning them)
 	normalized, err := diff.Normalize(cr.reconciliationResult.Live, cr.reconciliationResult.Target, cr.diffConfig)
 	if err != nil {
@@ -671,6 +742,8 @@ func (m *appStateManager) syncDestination(
 	project *v1alpha1.AppProject,
 	state *v1alpha1.OperationState,
 	compareResult *comparisonResult,
+	dest argo.ResolvedDestination,
+	dc *destinationComparison,
 	syncOp v1alpha1.SyncOperation,
 	ss syncSettings,
 	logEntry *log.Entry,
@@ -682,12 +755,11 @@ func (m *appStateManager) syncDestination(
 	trackingMethod := ss.trackingMethod
 	initialResourcesRes := ss.initialResourcesRes
 
-	destCluster, err := argo.GetDestinationCluster(ctx, app.Spec.Destination, m.db)
-	if err != nil {
-		state.Phase = common.OperationError
-		state.Message = fmt.Sprintf("Failed to get destination cluster: %v", err)
-		return destinationSyncOutcome{}, false
-	}
+	destCluster := dest.Cluster
+	// The destination's own namespace, not the application's: a resource routed to a named
+	// destination is applied into that destination's namespace and its service account is selected
+	// by it.
+	destNamespace := dest.Destination.Namespace
 
 	rawConfig, err := destCluster.RawRestConfig()
 	if err != nil {
@@ -704,7 +776,7 @@ func (m *appStateManager) syncDestination(
 	}
 	restConfig := metrics.AddMetricsTransportWrapper(m.metricsServer, app, clusterRESTConfig)
 
-	reconciliationResult := compareResult.reconciliationResult
+	reconciliationResult := dc.reconciliationResult
 
 	// if RespectIgnoreDifferences is enabled, it should normalize the target
 	// resources which in this case applies the live values in the configured
@@ -717,7 +789,7 @@ func (m *appStateManager) syncDestination(
 			return destinationSyncOutcome{}, false
 		}
 
-		patchedTargets, err := normalizeTargetResources(openAPISchema, compareResult)
+		patchedTargets, err := normalizeTargetResources(openAPISchema, dc)
 		if err != nil {
 			state.Phase = common.OperationError
 			state.Message = fmt.Sprintf("Failed to normalize target resources: %s", err)
@@ -732,7 +804,7 @@ func (m *appStateManager) syncDestination(
 		return destinationSyncOutcome{}, false
 	}
 	if impersonationEnabled {
-		serviceAccountToImpersonate, err := settings.DeriveServiceAccountToImpersonate(project, app, destCluster, app.Spec.Destination.Namespace)
+		serviceAccountToImpersonate, err := settings.DeriveServiceAccountToImpersonate(project, app, destCluster, destNamespace)
 		if err != nil {
 			state.Phase = common.OperationError
 			state.Message = fmt.Sprintf("failed to derive service account to impersonate: %v", err)
@@ -751,12 +823,12 @@ func (m *appStateManager) syncDestination(
 
 			if impersonationEnforced {
 				state.Phase = common.OperationError
-				state.Message = fmt.Sprintf("no matching service account found for destination server %s and namespace %s", destCluster.Server, app.Spec.Destination.Namespace)
+				state.Message = fmt.Sprintf("no matching service account found for destination server %s and namespace %s", destCluster.Server, destNamespace)
 				return destinationSyncOutcome{}, false
 			}
 
 			// Non-enforced mode: log info and continue with controller SA
-			logEntry.Infof("no matching service account found for impersonation (project: %s, server: %s, namespace: %s), falling back to controller service account", project.Name, destCluster.Server, app.Spec.Destination.Namespace)
+			logEntry.Infof("no matching service account found for impersonation (project: %s, server: %s, namespace: %s), falling back to controller service account", project.Name, destCluster.Server, destNamespace)
 		} else {
 			logEntry = logEntry.WithFields(log.Fields{"impersonationEnabled": "true", "serviceAccount": serviceAccountToImpersonate})
 			// set the impersonation headers.
@@ -789,7 +861,7 @@ func (m *appStateManager) syncDestination(
 		sync.WithManifestValidation(!syncOp.SyncOptions.HasOption(common.SyncOptionsDisableValidation)),
 		sync.WithSyncWaveHook(delayBetweenSyncWaves),
 		sync.WithPruneLast(syncOp.SyncOptions.HasOption(common.SyncOptionPruneLast)),
-		sync.WithResourceModificationChecker(syncOp.SyncOptions.HasOption("ApplyOutOfSyncOnly=true"), compareResult.diffResultList),
+		sync.WithResourceModificationChecker(syncOp.SyncOptions.HasOption("ApplyOutOfSyncOnly=true"), dc.diffResultList),
 		sync.WithPrunePropagationPolicy(&prunePropagationPolicy),
 		sync.WithReplace(syncOp.SyncOptions.HasOption(common.SyncOptionReplace)),
 		sync.WithServerSideApply(syncOp.SyncOptions.HasOption(common.SyncOptionServerSideApply)),
@@ -813,7 +885,7 @@ func (m *appStateManager) syncDestination(
 		restConfig,
 		rawConfig,
 		m.kubectl,
-		app.Spec.Destination.Namespace,
+		destNamespace,
 		opts...,
 	)
 	if err != nil {
