@@ -84,6 +84,7 @@ Below is a table that summarizes all possible resources and which actions are va
 | **logs**            | ✅  |   ❌   |   ❌   |   ❌   |  ❌  |    ❌    |   ❌   |    ❌    |   ❌   |
 | **exec**            | ❌  |   ✅   |   ❌   |   ❌   |  ❌  |    ❌    |   ❌   |    ❌    |   ❌   |
 | **extensions**      | ❌  |   ❌   |   ❌   |   ❌   |  ❌  |    ❌    |   ❌   |    ❌    |   ✅   |
+| **destinations**    | ✅  |   ✅   |   ✅   |   ✅   |  ✅  |    ✅    |   ✅   |    ✅    |   ❌   |
 
 ### Application-Specific Policy
 
@@ -93,9 +94,11 @@ Some policy only have meaning within an application. It is the case with the fol
 - `applicationsets`
 - `logs`
 - `exec`
+- `destinations`
 
 While they can be set in the global configuration, they can also be configured in [AppProject's roles](../user-guide/projects.md#project-roles).
-The expected `<object>` value in the policy structure is replaced by `<app-project>/<app-name>`.
+The expected `<object>` value in the policy structure is replaced by `<app-project>/<app-name>`, except for
+`destinations`, where it is `<app-project>/<destination-name>` — see [The `destinations` resource](#the-destinations-resource).
 
 For instance, these policies would grant `example-user` access to get any applications,
 but only be able to see logs in `my-app` application part of the `example-project` project.
@@ -316,6 +319,46 @@ applications under the `default` project.
 p, example-user, applications, get, default/*, allow
 p, example-user, extensions, invoke, httpbin, allow
 ```
+
+### The `destinations` resource
+
+The `destinations` resource is an [Application-Specific Policy](#application-specific-policy) that adds a
+destination dimension to application operations. It applies to Applications that declare additional named
+destinations in `spec.destinations`, where individual manifests are routed to a cluster with the
+`argocd.argoproj.io/destination` annotation.
+
+Unlike the other application-specific resources, the `<object>` is `<app-project>/<destination-name>`, where
+the destination name is the one declared in the Application's `spec.destinations`. The primary
+`spec.destination` is referred to by the empty name, matched by `<app-project>/`.
+
+This resource is **not** enforced by default. Enable it in `argocd-cm`:
+
+```yaml
+application.destinations.rbac.enabled: "true"
+```
+
+While disabled, destination names never appear in an RBAC request and existing policies are unaffected.
+
+When enabled, the destination check is applied **in addition to** the existing `applications` check — a user
+needs both. This lets a role be allowed to sync an application only to some of its destinations:
+
+```csv
+# Can sync any application in example-project, but only to the "staging" destination.
+p, example-user, applications, sync, example-project/*, allow
+p, example-user, destinations, sync, example-project/staging, allow
+```
+
+By default an operation is denied when no `destinations` policy matches. To fall back to allowing the
+operation instead, set:
+
+```yaml
+application.destinations.rbac.enforced: "false"
+```
+
+> [!WARNING]
+> Because the check is an AND, enabling `application.destinations.rbac.enabled` without granting the
+> `destinations` resource to your roles will deny every operation on applications that use named
+> destinations. Grant `destinations` alongside `applications` before enabling it.
 
 ### The `clusters` resource
 

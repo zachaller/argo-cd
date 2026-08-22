@@ -478,6 +478,20 @@ data:
   # Defaults to true for security. Only disable if you trust all applications.
   application.sync.impersonation.enforced: "true"
 
+  # application.destinations.enabled allows an Application to declare additional named destinations in
+  # spec.destinations, which individual manifests select with the argocd.argoproj.io/destination
+  # annotation. Manifests without that annotation are deployed to spec.destination.
+  application.destinations.enabled: "false"
+
+  # application.destinations.rbac.enabled additionally enforces RBAC against the "destinations"
+  # resource for every destination an operation touches, using the object <project>/<destination-name>.
+  # When disabled, destination names never appear in an RBAC request and existing policies are unaffected.
+  application.destinations.rbac.enabled: "false"
+
+  # application.destinations.rbac.enforced denies an operation when no destinations policy matches.
+  # Applies only when application.destinations.rbac.enabled is true. Defaults to true for security.
+  application.destinations.rbac.enforced: "true"
+
   # If true, passing passing a different revision from the one given in the application when syncing requires the `override` privilege.
   # The current default setting up to now (`false`) requires only `sync` privilege for syncing to a different revision.
   # We highly recommend that this be set to `true`. The next major release will set the default to be `true`.

@@ -69,6 +69,7 @@ const (
 	ResourceLogs              = "logs"
 	ResourceExec              = "exec"
 	ResourceExtensions        = "extensions"
+	ResourceDestinations      = "destinations"
 
 	// please add new items to Actions
 	ActionGet      = "get"
@@ -97,6 +98,7 @@ var (
 		ResourceLogs,
 		ResourceExec,
 		ResourceExtensions,
+		ResourceDestinations,
 	}
 	Actions = []string{
 		ActionGet,
@@ -118,6 +120,7 @@ var ProjectScoped = map[string]bool{
 	ResourceExec:            true,
 	ResourceClusters:        true,
 	ResourceRepositories:    true,
+	ResourceDestinations:    true,
 }
 
 // Enforcer is a wrapper around an Casbin enforcer that:
