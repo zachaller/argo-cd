@@ -101,6 +101,20 @@ The check is off by default and, when on, applies only to the names in `spec.des
 primary `spec.destination` is unaffected. See
 [the `destinations` resource](../operator-manual/rbac.md#the-destinations-resource).
 
+## Deletion
+
+Deleting an Application removes its resources from every destination it deploys to. A destination is
+only considered done when nothing is left in it, so the Application's finalizer stays in place until
+all of them are clear.
+
+A destination whose cluster can no longer be resolved is skipped with a warning rather than blocking
+the deletion — its resources went with the cluster, and refusing to proceed would strand the
+resources still reachable elsewhere.
+
+> [!NOTE]
+> `PreDelete` and `PostDelete` hooks run in the primary destination, where they were created. They
+> are not routed by the `argocd.argoproj.io/destination` annotation.
+
 ## Limitation: addressing a resource that exists in two destinations
 
 Argo CD identifies a live resource by its group, kind, namespace and name. An Application whose

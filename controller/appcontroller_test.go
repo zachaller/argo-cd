@@ -94,6 +94,9 @@ type MockKubectl struct {
 	kube.Kubectl
 
 	DeletedResources []kube.ResourceKey
+	// DeletedFromHosts records the API server each delete was sent to, parallel to DeletedResources,
+	// so a test can tell which cluster a resource was removed from.
+	DeletedFromHosts []string
 	CreatedResources []*unstructured.Unstructured
 }
 
@@ -104,6 +107,7 @@ func (m *MockKubectl) CreateResource(ctx context.Context, config *rest.Config, g
 
 func (m *MockKubectl) DeleteResource(ctx context.Context, config *rest.Config, gvk schema.GroupVersionKind, name string, namespace string, deleteOptions metav1.DeleteOptions) error {
 	m.DeletedResources = append(m.DeletedResources, kube.NewResourceKey(gvk.Group, gvk.Kind, namespace, name))
+	m.DeletedFromHosts = append(m.DeletedFromHosts, config.Host)
 	return m.Kubectl.DeleteResource(ctx, config, gvk, name, namespace, deleteOptions)
 }
 
@@ -1152,6 +1156,63 @@ func TestFinalizeAppDeletion(t *testing.T) {
 		for _, o := range ctrl.kubectl.(*MockKubectl).DeletedResources {
 			assert.NotEqual(t, "test-cm", o.Name)
 		}
+	})
+
+	// Resources routed to a named destination live in that cluster, and nothing else will ever
+	// remove them, so deletion has to reach every destination the application declares.
+	t.Run("CascadingDeleteAcrossDestinations", func(t *testing.T) {
+		secondCluster := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "second-cluster-secret",
+				Namespace: test.FakeArgoCDNamespace,
+				Labels:    map[string]string{"argocd.argoproj.io/secret-type": "cluster"},
+			},
+			Data: map[string][]byte{
+				"name":   []byte("second"),
+				"server": []byte("https://second.example.com"),
+				"config": []byte(`{"bearerToken":"fake","tlsClientConfig":{"insecure":true},"awsAuthConfig":null}`),
+			},
+		}
+
+		app := newFakeApp()
+		app.SetCascadedDeletion(v1alpha1.ResourcesFinalizerName)
+		app.DeletionTimestamp = &now
+		app.Spec.Destination.Namespace = test.FakeArgoCDNamespace
+		app.Spec.Destinations = []v1alpha1.NamedDestination{
+			{Name: "second", Server: "https://second.example.com", Namespace: "second"},
+		}
+		// A managed resource rather than the Application itself: shouldBeDeleted skips an
+		// application's own object, so using it would assert nothing.
+		cm := newFakeCM()
+		managedObj := kube.MustToUnstructured(&cm)
+
+		ctrl := newFakeController(t.Context(), &fakeData{
+			apps:           []runtime.Object{app, &defaultProj},
+			additionalObjs: []runtime.Object{secondCluster},
+			managedLiveObjs: map[kube.ResourceKey]*unstructured.Unstructured{
+				kube.GetResourceKey(managedObj): managedObj,
+			},
+		}, nil)
+
+		fakeAppCs := ctrl.applicationClientset.(*appclientset.Clientset)
+		defaultReactor := fakeAppCs.ReactionChain[0]
+		fakeAppCs.ReactionChain = nil
+		fakeAppCs.AddReactor("get", "*", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+			return defaultReactor.React(action)
+		})
+		fakeAppCs.AddReactor("patch", "*", func(_ kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+			return true, &v1alpha1.Application{}, nil
+		})
+
+		err := ctrl.finalizeApplicationDeletion(t.Context(), app, func(_ string) ([]*v1alpha1.Cluster, error) {
+			return []*v1alpha1.Cluster{}, nil
+		})
+		require.NoError(t, err)
+
+		assert.ElementsMatch(t,
+			[]string{"https://localhost:6443", "https://second.example.com"},
+			ctrl.kubectl.(*MockKubectl).DeletedFromHosts,
+			"the resource must be deleted from both the primary and the named destination")
 	})
 
 	t.Run("DeleteWithDestinationClusterName", func(t *testing.T) {

@@ -1338,6 +1338,48 @@ func (ctrl *ApplicationController) getPermittedAppLiveObjects(destCluster *appv1
 	return objsMap, nil
 }
 
+// deletionDestination is one cluster an application's resources have to be removed from.
+type deletionDestination struct {
+	name    string
+	cluster *appv1.Cluster
+	config  *rest.Config
+}
+
+// resolveDeletionDestinations resolves every destination the application declares, skipping any that
+// cannot be resolved to a cluster.
+//
+// Deletion tolerates a missing cluster where reconcile does not. A cluster that no longer exists has
+// taken its resources with it, and refusing to proceed would strand the resources that are still
+// reachable in the other destinations -- the application's finalizer would never be removed, or
+// would be removed with those resources left behind. An unresolvable destination is therefore logged
+// and skipped, and the caller decides what to do when nothing resolves at all.
+func (ctrl *ApplicationController) resolveDeletionDestinations(ctx context.Context, app *appv1.Application, proj *appv1.AppProject, logCtx *log.Entry) ([]deletionDestination, error) {
+	dests := make([]deletionDestination, 0, len(app.Spec.Destinations)+1)
+	for _, named := range app.Spec.AllDestinations() {
+		destination := named.ToApplicationDestination()
+		if named.Name == argo.PrimaryDestinationName {
+			destination = app.Spec.Destination
+		}
+		cluster, err := argo.GetDestinationCluster(ctx, destination, ctrl.db)
+		if err != nil {
+			logCtx.WithError(err).WithField("destination", named.Name).Warn("Unable to get destination cluster")
+			continue
+		}
+		clusterRESTConfig, err := cluster.RESTConfig()
+		if err != nil {
+			return nil, err
+		}
+		config := metrics.AddMetricsTransportWrapper(ctrl.metricsServer, app, clusterRESTConfig)
+		// An impersonation failure is a configuration error rather than a missing cluster, so it
+		// fails the deletion and is retried instead of silently skipping the destination.
+		if err := ctrl.applyImpersonationConfig(config, proj, app, cluster); err != nil {
+			return nil, fmt.Errorf("cannot apply impersonation: %w", err)
+		}
+		dests = append(dests, deletionDestination{name: named.Name, cluster: cluster, config: config})
+	}
+	return dests, nil
+}
+
 func (ctrl *ApplicationController) finalizeApplicationDeletion(ctx context.Context, app *appv1.Application, projectClusters func(project string) ([]*appv1.Cluster, error)) (retErr error) {
 	ctx, span := tracer.Start(ctx, "controller.finalizeApplicationDeletion")
 	setAppTraceAttrs(span, app)
@@ -1356,10 +1398,13 @@ func (ctrl *ApplicationController) finalizeApplicationDeletion(ctx context.Conte
 		return err
 	}
 
-	// Get destination cluster
-	destCluster, err := argo.GetDestinationCluster(ctx, app.Spec.Destination, ctrl.db)
+	// Every destination the application deploys to, not just the primary one: resources routed to a
+	// named destination live in that cluster and are nobody else's to remove.
+	dests, err := ctrl.resolveDeletionDestinations(ctx, app, proj, logCtx)
 	if err != nil {
-		logCtx.WithError(err).Warn("Unable to get destination cluster")
+		return err
+	}
+	if len(dests) == 0 {
 		app.UnSetCascadedDeletion()
 		app.UnSetPostDeleteFinalizerAll()
 		app.UnSetPreDeleteFinalizerAll()
@@ -1370,25 +1415,31 @@ func (ctrl *ApplicationController) finalizeApplicationDeletion(ctx context.Conte
 		return nil
 	}
 
-	clusterRESTConfig, err := destCluster.RESTConfig()
-	if err != nil {
-		return err
-	}
-	config := metrics.AddMetricsTransportWrapper(ctrl.metricsServer, app, clusterRESTConfig)
-
-	// Apply impersonation config if necessary
-	if err := ctrl.applyImpersonationConfig(config, proj, app, destCluster); err != nil {
-		return fmt.Errorf("cannot apply impersonation: %w", err)
+	// Delete hooks run in the primary destination, where they were created. They are rendered from
+	// the application's manifests like any other resource, so routing them by the destination
+	// annotation is possible but is a separate change; today they are not partitioned.
+	primary := dests[0]
+	if primary.name != argo.PrimaryDestinationName {
+		// The primary destination is gone, so its hooks can neither run nor be cleaned up. Drop
+		// their finalizers -- what an unresolvable destination has always done -- rather than
+		// leaving the application stuck behind a hook that can never complete, and carry on
+		// removing the resources in the destinations that are still reachable.
+		logCtx.Warn("Primary destination is unresolvable; removing delete hook finalizers")
+		app.UnSetPostDeleteFinalizerAll()
+		app.UnSetPreDeleteFinalizerAll()
+		if err := ctrl.updateFinalizers(app); err != nil {
+			return err
+		}
 	}
 
 	// Handle PreDelete hooks - run them before any deletion occurs
 	if app.HasPreDeleteFinalizer() {
-		objsMap, err := ctrl.getPermittedAppLiveObjects(destCluster, app, proj, projectClusters)
+		objsMap, err := ctrl.getPermittedAppLiveObjects(primary.cluster, app, proj, projectClusters)
 		if err != nil {
 			return fmt.Errorf("error getting permitted app live objects: %w", err)
 		}
 
-		done, err := ctrl.executePreDeleteHooks(ctx, app, proj, objsMap, config, logCtx)
+		done, err := ctrl.executePreDeleteHooks(ctx, app, proj, objsMap, primary.config, logCtx)
 		if err != nil {
 			return fmt.Errorf("error executing pre-delete hooks: %w", err)
 		}
@@ -1406,30 +1457,6 @@ func (ctrl *ApplicationController) finalizeApplicationDeletion(ctx context.Conte
 	if app.CascadedDeletion() {
 		deletionApproved := app.IsDeletionConfirmed(app.DeletionTimestamp.Time)
 		logCtx.Infof("Deleting resources")
-		// ApplicationDestination points to a valid cluster, so we may clean up the live objects
-		objs := make([]*unstructured.Unstructured, 0)
-		objsMap, err := ctrl.getPermittedAppLiveObjects(destCluster, app, proj, projectClusters)
-		if err != nil {
-			return err
-		}
-
-		for k := range objsMap {
-			// Wait for objects pending deletion to complete before proceeding with next sync wave
-			if objsMap[k].GetDeletionTimestamp() != nil {
-				logCtx.Infof("%d objects remaining for deletion", len(objsMap))
-				return nil
-			}
-
-			if ctrl.shouldBeDeleted(app, objsMap[k]) {
-				objs = append(objs, objsMap[k])
-				if res, ok := app.Status.FindResource(k); ok && res.RequiresDeletionConfirmation && !deletionApproved {
-					logCtx.Infof("Resource %v requires manual confirmation to delete", k)
-					return nil
-				}
-			}
-		}
-
-		filteredObjs := FilterObjectsForDeletion(objs)
 
 		propagationPolicy := metav1.DeletePropagationForeground
 		if app.GetPropagationPolicy() == appv1.BackgroundPropagationPolicyFinalizer {
@@ -1437,40 +1464,77 @@ func (ctrl *ApplicationController) finalizeApplicationDeletion(ctx context.Conte
 		}
 		logCtx.Infof("Deleting application's resources with %s propagation policy", propagationPolicy)
 
-		err = kube.RunAllAsync(len(filteredObjs), func(i int) error {
-			obj := filteredObjs[i]
-			return ctrl.kubectl.DeleteResource(ctx, config, obj.GroupVersionKind(), obj.GetName(), obj.GetNamespace(), metav1.DeleteOptions{PropagationPolicy: &propagationPolicy})
-		})
-		if err != nil {
-			return err
+		// Gather what has to go in every destination before deleting anything in any of them. A
+		// destination that is still waiting -- on an object mid-deletion, or on manual confirmation
+		// -- stops the whole pass, so the application is never half torn down across clusters.
+		toDelete := make([][]*unstructured.Unstructured, len(dests))
+		deleted := 0
+		for i, dest := range dests {
+			objsMap, err := ctrl.getPermittedAppLiveObjects(dest.cluster, app, proj, projectClusters)
+			if err != nil {
+				return err
+			}
+
+			objs := make([]*unstructured.Unstructured, 0)
+			for k := range objsMap {
+				// Wait for objects pending deletion to complete before proceeding with next sync wave
+				if objsMap[k].GetDeletionTimestamp() != nil {
+					logCtx.Infof("%d objects remaining for deletion", len(objsMap))
+					return nil
+				}
+
+				if ctrl.shouldBeDeleted(app, objsMap[k]) {
+					objs = append(objs, objsMap[k])
+					if res, ok := app.Status.FindResource(k, dest.name); ok && res.RequiresDeletionConfirmation && !deletionApproved {
+						logCtx.Infof("Resource %v requires manual confirmation to delete", k)
+						return nil
+					}
+				}
+			}
+			toDelete[i] = FilterObjectsForDeletion(objs)
+			deleted += len(objs)
 		}
 
-		objsMap, err = ctrl.getPermittedAppLiveObjects(destCluster, app, proj, projectClusters)
-		if err != nil {
-			return err
-		}
-
-		for k, obj := range objsMap {
-			if !ctrl.shouldBeDeleted(app, obj) {
-				delete(objsMap, k)
+		for i, dest := range dests {
+			filteredObjs := toDelete[i]
+			err = kube.RunAllAsync(len(filteredObjs), func(i int) error {
+				obj := filteredObjs[i]
+				return ctrl.kubectl.DeleteResource(ctx, dest.config, obj.GroupVersionKind(), obj.GetName(), obj.GetNamespace(), metav1.DeleteOptions{PropagationPolicy: &propagationPolicy})
+			})
+			if err != nil {
+				return err
 			}
 		}
-		if len(objsMap) > 0 {
-			logCtx.Infof("%d objects remaining for deletion", len(objsMap))
+
+		remaining := 0
+		for _, dest := range dests {
+			objsMap, err := ctrl.getPermittedAppLiveObjects(dest.cluster, app, proj, projectClusters)
+			if err != nil {
+				return err
+			}
+			for k, obj := range objsMap {
+				if !ctrl.shouldBeDeleted(app, obj) {
+					delete(objsMap, k)
+				}
+			}
+			remaining += len(objsMap)
+		}
+		if remaining > 0 {
+			logCtx.Infof("%d objects remaining for deletion", remaining)
 			return nil
 		}
-		logCtx.Infof("Successfully deleted %d resources", len(objs))
+		logCtx.Infof("Successfully deleted %d resources", deleted)
 		app.UnSetCascadedDeletion()
 		return ctrl.updateFinalizers(app)
 	}
 
 	if app.HasPostDeleteFinalizer() {
-		objsMap, err := ctrl.getPermittedAppLiveObjects(destCluster, app, proj, projectClusters)
+		objsMap, err := ctrl.getPermittedAppLiveObjects(primary.cluster, app, proj, projectClusters)
 		if err != nil {
 			return err
 		}
 
-		done, err := ctrl.executePostDeleteHooks(ctx, app, proj, objsMap, config, logCtx)
+		done, err := ctrl.executePostDeleteHooks(ctx, app, proj, objsMap, primary.config, logCtx)
 		if err != nil {
 			return err
 		}
@@ -1482,12 +1546,12 @@ func (ctrl *ApplicationController) finalizeApplicationDeletion(ctx context.Conte
 	}
 
 	if app.HasPreDeleteFinalizer("cleanup") {
-		objsMap, err := ctrl.getPermittedAppLiveObjects(destCluster, app, proj, projectClusters)
+		objsMap, err := ctrl.getPermittedAppLiveObjects(primary.cluster, app, proj, projectClusters)
 		if err != nil {
 			return fmt.Errorf("error getting permitted app live objects for pre-delete cleanup: %w", err)
 		}
 
-		done, err := ctrl.cleanupPreDeleteHooks(ctx, objsMap, config, logCtx)
+		done, err := ctrl.cleanupPreDeleteHooks(ctx, objsMap, primary.config, logCtx)
 		if err != nil {
 			return fmt.Errorf("error cleaning up pre-delete hooks: %w", err)
 		}
@@ -1499,12 +1563,12 @@ func (ctrl *ApplicationController) finalizeApplicationDeletion(ctx context.Conte
 	}
 
 	if app.HasPostDeleteFinalizer("cleanup") {
-		objsMap, err := ctrl.getPermittedAppLiveObjects(destCluster, app, proj, projectClusters)
+		objsMap, err := ctrl.getPermittedAppLiveObjects(primary.cluster, app, proj, projectClusters)
 		if err != nil {
 			return err
 		}
 
-		done, err := ctrl.cleanupPostDeleteHooks(ctx, objsMap, config, logCtx)
+		done, err := ctrl.cleanupPostDeleteHooks(ctx, objsMap, primary.config, logCtx)
 		if err != nil {
 			return err
 		}

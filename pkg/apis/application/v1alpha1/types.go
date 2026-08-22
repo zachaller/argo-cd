@@ -1324,10 +1324,14 @@ type SourceHydratorStatus struct {
 	LastComparedDryRevision string `json:"lastComparedDryRevision,omitempty" protobuf:"bytes,3,opt,name=lastComparedDryRevision"`
 }
 
-func (status *ApplicationStatus) FindResource(key kube.ResourceKey) (*ResourceStatus, bool) {
+// FindResource returns the status of the resource with the given key in the given destination. The
+// empty destination is the primary spec.destination. An Application that deploys to several
+// destinations may hold the same key in more than one of them, so the destination is part of the
+// resource's identity rather than an optional filter.
+func (status *ApplicationStatus) FindResource(key kube.ResourceKey, destination string) (*ResourceStatus, bool) {
 	for i := range status.Resources {
 		res := status.Resources[i]
-		if kube.NewResourceKey(res.Group, res.Kind, res.Namespace, res.Name) == key {
+		if res.Destination == destination && kube.NewResourceKey(res.Group, res.Kind, res.Namespace, res.Name) == key {
 			return &res, true
 		}
 	}
