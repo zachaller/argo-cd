@@ -284,6 +284,53 @@ func (s *Server) getApplicationEnforceRBACClient(ctx context.Context, action, pr
 	})
 }
 
+// enforceDestinations checks the "destinations" RBAC resource for the named destinations an
+// Application declares, on top of the "applications" check the caller has already made. The two
+// compose as an AND: a user must be permitted the action on the Application and on every cluster
+// that Application pushes into.
+//
+// Only spec.destinations is checked. The primary spec.destination stays governed by the AppProject's
+// destination allow list and the applications check exactly as before, so enabling the feature
+// changes nothing for an Application that declares no named destinations -- which is also why the
+// settings are not read at all in that case.
+//
+// The object is "<project>/<destination-name>", matching how the resource is registered as project
+// scoped in util/rbac.
+func (s *Server) enforceDestinations(ctx context.Context, project string, dests []v1alpha1.NamedDestination, action string) error {
+	if len(dests) == 0 {
+		return nil
+	}
+	enabled, err := s.settingsMgr.IsDestinationRBACEnabled()
+	if err != nil {
+		return fmt.Errorf("error checking whether destination RBAC is enabled: %w", err)
+	}
+	if !enabled {
+		return nil
+	}
+	enforced, err := s.settingsMgr.IsDestinationRBACEnforced()
+	if err != nil {
+		return fmt.Errorf("error checking whether destination RBAC is enforced: %w", err)
+	}
+	for _, dest := range dests {
+		err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceDestinations, action, project+"/"+dest.Name)
+		if err == nil {
+			continue
+		}
+		if !enforced {
+			// Audit mode: report what would have been denied so operators can write the policies
+			// before turning enforcement on.
+			log.WithFields(map[string]any{
+				"project":                project,
+				"destination":            dest.Name,
+				argocommon.SecurityField: argocommon.SecurityMedium,
+			}).Warnf("user is not permitted to %s destination %q, but destination RBAC is not enforced", action, dest.Name)
+			continue
+		}
+		return err
+	}
+	return nil
+}
+
 // List returns list of applications
 func (s *Server) List(ctx context.Context, q *application.ApplicationQuery) (*v1alpha1.ApplicationList, error) {
 	selector, err := labels.Parse(q.GetSelector())
@@ -352,6 +399,9 @@ func (s *Server) Create(ctx context.Context, q *application.ApplicationCreateReq
 	a := q.GetApplication()
 
 	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionCreate, a.RBACName(s.ns)); err != nil {
+		return nil, err
+	}
+	if err := s.enforceDestinations(ctx, a.Spec.GetProject(), a.Spec.Destinations, rbac.ActionCreate); err != nil {
 		return nil, err
 	}
 
@@ -970,6 +1020,16 @@ func (s *Server) validateAndUpdateApp(ctx context.Context, newApp *v1alpha1.Appl
 		return nil, err
 	}
 
+	// Both the stored and the incoming destinations: the user must be permitted the ones the
+	// Application already pushes into to change it at all, and the ones it would push into
+	// afterwards so that an update cannot point it at a cluster they may not reach.
+	if err := s.enforceDestinations(ctx, app.Spec.GetProject(), app.Spec.Destinations, action); err != nil {
+		return nil, err
+	}
+	if err := s.enforceDestinations(ctx, newApp.Spec.GetProject(), newApp.Spec.Destinations, action); err != nil {
+		return nil, err
+	}
+
 	err = s.validateAndNormalizeApp(ctx, newApp, proj, validate)
 	if err != nil {
 		return nil, fmt.Errorf("error validating and normalizing app: %w", err)
@@ -1170,6 +1230,9 @@ func (s *Server) Delete(ctx context.Context, q *application.ApplicationDeleteReq
 	defer s.projectLock.RUnlock(a.Spec.Project)
 
 	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionDelete, a.RBACName(s.ns)); err != nil {
+		return nil, err
+	}
+	if err := s.enforceDestinations(ctx, a.Spec.GetProject(), a.Spec.Destinations, rbac.ActionDelete); err != nil {
 		return nil, err
 	}
 
@@ -1492,6 +1555,15 @@ func (s *Server) getAppLiveResource(ctx context.Context, action string, q *appli
 		return nil, nil, nil, err
 	}
 
+	// The action a destinations policy is written against: the bare verb, without the per-resource
+	// detail either already on it (a resource action arrives as "action/<group>/<kind>/<name>") or
+	// appended below for fine-grained update and delete. That detail names a resource, not a
+	// destination, so a destinations policy is written against the verb alone.
+	destinationAction := action
+	if i := strings.Index(destinationAction, "/"); i >= 0 {
+		destinationAction = destinationAction[:i]
+	}
+
 	if fineGrainedInheritanceDisabled && (action == rbac.ActionDelete || action == rbac.ActionUpdate) {
 		action = fmt.Sprintf("%s/%s/%s/%s/%s", action, q.GetGroup(), q.GetKind(), q.GetNamespace(), q.GetResourceName())
 	}
@@ -1501,6 +1573,15 @@ func (s *Server) getAppLiveResource(ctx context.Context, action string, q *appli
 		a, _, err = s.getApplicationEnforceRBACInformer(ctx, action, q.GetProject(), q.GetAppNamespace(), q.GetName())
 	}
 	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Every named destination, not just the one this resource lives in. ApplicationTree.FindNode
+	// below is not destination aware yet, so the same group/kind/namespace/name in two clusters
+	// resolves to whichever node comes first; deciding access from that node's destination could
+	// decide it against the wrong cluster. Requiring the whole set is the fail-closed reading, and
+	// can be narrowed once the tree carries destinations through lookup.
+	if err := s.enforceDestinations(ctx, a.Spec.GetProject(), a.Spec.Destinations, destinationAction); err != nil {
 		return nil, nil, nil, err
 	}
 
@@ -2104,6 +2185,9 @@ func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncR
 	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionSync, a.RBACName(s.ns)); err != nil {
 		return nil, err
 	}
+	if err := s.enforceDestinations(ctx, a.Spec.GetProject(), a.Spec.Destinations, rbac.ActionSync); err != nil {
+		return nil, err
+	}
 
 	if syncReq.Manifests != nil {
 		if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionOverride, a.RBACName(s.ns)); err != nil {
@@ -2277,6 +2361,9 @@ func (s *Server) Rollback(ctx context.Context, rollbackReq *application.Applicat
 	}
 	a, _, err := s.getApplicationEnforceRBACClient(ctx, action, rollbackReq.GetProject(), rollbackReq.GetAppNamespace(), rollbackReq.GetName(), "")
 	if err != nil {
+		return nil, err
+	}
+	if err := s.enforceDestinations(ctx, a.Spec.GetProject(), a.Spec.Destinations, action); err != nil {
 		return nil, err
 	}
 
@@ -2522,6 +2609,9 @@ func (s *Server) TerminateOperation(ctx context.Context, termOpReq *application.
 	appNs := s.appNamespaceOrDefault(termOpReq.GetAppNamespace())
 	a, _, err := s.getApplicationEnforceRBACClient(ctx, rbac.ActionSync, termOpReq.GetProject(), appNs, appName, "")
 	if err != nil {
+		return nil, err
+	}
+	if err := s.enforceDestinations(ctx, a.Spec.GetProject(), a.Spec.Destinations, rbac.ActionSync); err != nil {
 		return nil, err
 	}
 

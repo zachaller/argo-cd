@@ -328,8 +328,27 @@ destinations in `spec.destinations`, where individual manifests are routed to a 
 `argocd.argoproj.io/destination` annotation.
 
 Unlike the other application-specific resources, the `<object>` is `<app-project>/<destination-name>`, where
-the destination name is the one declared in the Application's `spec.destinations`. The primary
-`spec.destination` is referred to by the empty name, matched by `<app-project>/`.
+the destination name is the one declared in the Application's `spec.destinations`.
+
+Only the named destinations in `spec.destinations` are checked. The primary `spec.destination` stays governed
+by the AppProject's destination allow list and the `applications` check, exactly as before, so an Application
+that declares no named destinations is unaffected by this resource no matter how it is configured.
+
+The check is applied to the operations that reach a destination cluster or change which clusters an
+Application uses: `create`, `update` (including `argocd app set` and patch), `delete`, `sync`, `rollback`,
+terminating a running operation, and the resource-level operations (`get`, `patch`, `delete` and resource
+actions on an individual live resource).
+
+> [!NOTE]
+> Resource-level operations are checked against **every** named destination of the Application, not only the
+> destination the individual resource lives in. This is deliberate: the resource lookup is not yet
+> destination-aware, so a resource with the same group, kind, namespace and name in two clusters could
+> otherwise be authorized against the wrong one.
+
+> [!WARNING]
+> Opening a terminal into a pod (the `exec` resource) is **not** destination-checked. That path resolves its
+> cluster from `spec.destination` alone, so it cannot reach a pod in a named destination in the first place;
+> do not rely on a `destinations` policy to restrict it.
 
 This resource is **not** enforced by default. Enable it in `argocd-cm`:
 
@@ -355,10 +374,15 @@ operation instead, set:
 application.destinations.rbac.enforced: "false"
 ```
 
+With enforcement off, an operation that no policy permits is allowed but logged as a warning naming the
+project, the destination and the action. Use this to write the policies your roles need before switching
+enforcement on.
+
 > [!WARNING]
 > Because the check is an AND, enabling `application.destinations.rbac.enabled` without granting the
 > `destinations` resource to your roles will deny every operation on applications that use named
-> destinations. Grant `destinations` alongside `applications` before enabling it.
+> destinations. Grant `destinations` alongside `applications` before enabling it, or enable it with
+> `application.destinations.rbac.enforced: "false"` first and read the warnings it logs.
 
 ### The `clusters` resource
 

@@ -95,7 +95,10 @@ that destination.
 
 ## RBAC
 
-Destinations can additionally be enforced through RBAC. See
+Each named destination can additionally be made a separate authorization axis, so that a role allowed
+to sync an Application is not thereby allowed to sync it into every cluster the Application reaches.
+The check is off by default and, when on, applies only to the names in `spec.destinations` -- the
+primary `spec.destination` is unaffected. See
 [the `destinations` resource](../operator-manual/rbac.md#the-destinations-resource).
 
 ## Limitation: manifests are generated once
