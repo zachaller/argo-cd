@@ -494,7 +494,7 @@ func (ctrl *ApplicationController) handleObjectUpdated(managedByApp map[string]b
 
 // setAppManagedResources will build a list of ResourceDiff based on the provided comparisonResult
 // and persist app resources related data in the cache. Will return the persisted ApplicationTree.
-func (ctrl *ApplicationController) setAppManagedResources(ctx context.Context, destCluster *appv1.Cluster, a *appv1.Application, comparisonResult *comparisonResult) (*appv1.ApplicationTree, error) {
+func (ctrl *ApplicationController) setAppManagedResources(ctx context.Context, dests map[string]argo.ResolvedDestination, destOrder []string, a *appv1.Application, comparisonResult *comparisonResult) (*appv1.ApplicationTree, error) {
 	ts := stats.NewTimingStats()
 	defer func() {
 		logCtx := log.WithFields(applog.GetAppLogFields(a))
@@ -504,12 +504,12 @@ func (ctrl *ApplicationController) setAppManagedResources(ctx context.Context, d
 		logCtx = logCtx.WithField("time_ms", time.Since(ts.StartTime).Milliseconds())
 		logCtx.Debug("Finished setting app managed resources")
 	}()
-	managedResources, err := ctrl.hideSecretData(ctx, destCluster, a, comparisonResult)
+	managedResources, err := ctrl.hideSecretData(ctx, dests, a, comparisonResult)
 	ts.AddCheckpoint("hide_secret_data_ms")
 	if err != nil {
 		return nil, fmt.Errorf("error getting managed resources: %w", err)
 	}
-	tree, err := ctrl.getResourceTree(destCluster, a, managedResources)
+	tree, err := ctrl.getResourceTree(dests, destOrder, a, managedResources)
 	ts.AddCheckpoint("get_resource_tree_ms")
 	if err != nil {
 		return nil, fmt.Errorf("error getting resource tree: %w", err)
@@ -551,7 +551,7 @@ func isKnownOrphanedResourceExclusion(key kube.ResourceKey, proj *appv1.AppProje
 	return false
 }
 
-func (ctrl *ApplicationController) getResourceTree(destCluster *appv1.Cluster, a *appv1.Application, managedResources []*appv1.ResourceDiff) (*appv1.ApplicationTree, error) {
+func (ctrl *ApplicationController) getResourceTree(dests map[string]argo.ResolvedDestination, destOrder []string, a *appv1.Application, managedResources []*appv1.ResourceDiff) (*appv1.ApplicationTree, error) {
 	ts := stats.NewTimingStats()
 	defer func() {
 		logCtx := log.WithFields(applog.GetAppLogFields(a))
@@ -561,109 +561,164 @@ func (ctrl *ApplicationController) getResourceTree(destCluster *appv1.Cluster, a
 		logCtx = logCtx.WithField("time_ms", time.Since(ts.StartTime).Milliseconds())
 		logCtx.Debug("Finished getting resource tree")
 	}()
-	nodes := make([]appv1.ResourceNode, 0)
 	proj, err := ctrl.getAppProj(a)
 	ts.AddCheckpoint("get_app_proj_ms")
 	if err != nil {
 		return nil, fmt.Errorf("failed to get project: %w", err)
 	}
 
-	orphanedNodesMap := make(map[kube.ResourceKey]appv1.ResourceNode)
-	warnOrphaned := true
-	if proj.Spec.OrphanedResources != nil {
-		orphanedNodesMap, err = ctrl.stateCache.GetNamespaceTopLevelResources(destCluster, a.Spec.Destination.Namespace)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get namespace top-level resources: %w", err)
-		}
-		warnOrphaned = proj.Spec.OrphanedResources.IsWarn()
+	// Group the managed resources by the destination they were compared against, so each
+	// destination's subtree is built from its own cluster's live state. Orphan detection,
+	// hierarchy traversal and host collection are all reads against one cluster's cache and
+	// cannot be shared between destinations.
+	byDest := make(map[string][]*appv1.ResourceDiff, len(destOrder))
+	for _, mr := range managedResources {
+		byDest[mr.Destination] = append(byDest[mr.Destination], mr)
 	}
-	ts.AddCheckpoint("get_orphaned_resources_ms")
-	managedResourcesKeys := make([]kube.ResourceKey, 0)
-	for i := range managedResources {
-		managedResource := managedResources[i]
-		delete(orphanedNodesMap, kube.NewResourceKey(managedResource.Group, managedResource.Kind, managedResource.Namespace, managedResource.Name))
-		live := &unstructured.Unstructured{}
-		err := json.Unmarshal([]byte(managedResource.LiveState), &live)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal live state of managed resources: %w", err)
-		}
 
-		if live == nil {
-			target := &unstructured.Unstructured{}
-			err = json.Unmarshal([]byte(managedResource.TargetState), &target)
+	allNodes := make([]appv1.ResourceNode, 0)
+	allOrphanedNodes := make([]appv1.ResourceNode, 0)
+	allHosts := make([]appv1.HostInfo, 0)
+	warnOrphanedOverall := true
+
+	for _, destName := range destOrder {
+		dest, ok := dests[destName]
+		if !ok {
+			continue
+		}
+		destCluster := dest.Cluster
+		managedResources := byDest[destName]
+		nodes := make([]appv1.ResourceNode, 0)
+
+		orphanedNodesMap := make(map[kube.ResourceKey]appv1.ResourceNode)
+		warnOrphaned := true
+		if proj.Spec.OrphanedResources != nil {
+			orphanedNodesMap, err = ctrl.stateCache.GetNamespaceTopLevelResources(destCluster, a.Spec.Destination.Namespace)
 			if err != nil {
-				return nil, fmt.Errorf("failed to unmarshal target state of managed resources: %w", err)
+				return nil, fmt.Errorf("failed to get namespace top-level resources: %w", err)
 			}
-			nodes = append(nodes, appv1.ResourceNode{
-				ResourceRef: appv1.ResourceRef{
-					Version:   target.GroupVersionKind().Version,
-					Name:      managedResource.Name,
-					Kind:      managedResource.Kind,
-					Group:     managedResource.Group,
-					Namespace: managedResource.Namespace,
-				},
-				Health: &appv1.HealthStatus{
-					Status: health.HealthStatusMissing,
-				},
+			warnOrphaned = proj.Spec.OrphanedResources.IsWarn()
+		}
+		ts.AddCheckpoint("get_orphaned_resources_ms")
+		managedResourcesKeys := make([]kube.ResourceKey, 0)
+		for i := range managedResources {
+			managedResource := managedResources[i]
+			delete(orphanedNodesMap, kube.NewResourceKey(managedResource.Group, managedResource.Kind, managedResource.Namespace, managedResource.Name))
+			live := &unstructured.Unstructured{}
+			err := json.Unmarshal([]byte(managedResource.LiveState), &live)
+			if err != nil {
+				return nil, fmt.Errorf("failed to unmarshal live state of managed resources: %w", err)
+			}
+
+			if live == nil {
+				target := &unstructured.Unstructured{}
+				err = json.Unmarshal([]byte(managedResource.TargetState), &target)
+				if err != nil {
+					return nil, fmt.Errorf("failed to unmarshal target state of managed resources: %w", err)
+				}
+				nodes = append(nodes, appv1.ResourceNode{
+					ResourceRef: appv1.ResourceRef{
+						Version:   target.GroupVersionKind().Version,
+						Name:      managedResource.Name,
+						Kind:      managedResource.Kind,
+						Group:     managedResource.Group,
+						Namespace: managedResource.Namespace,
+					},
+					Health: &appv1.HealthStatus{
+						Status: health.HealthStatusMissing,
+					},
+				})
+			} else {
+				managedResourcesKeys = append(managedResourcesKeys, kube.GetResourceKey(live))
+			}
+		}
+		// Process managed resources and their children, including cross-namespace relationships
+		// from cluster-scoped parents (e.g., Crossplane CompositeResourceDefinitions)
+		err = ctrl.stateCache.IterateHierarchyV2(destCluster, managedResourcesKeys, func(child appv1.ResourceNode, _ string) bool {
+			permitted, _ := proj.IsResourcePermitted(schema.GroupKind{Group: child.Group, Kind: child.Kind}, child.Name, child.Namespace, destCluster, func(project string) ([]*appv1.Cluster, error) {
+				clusters, err := ctrl.db.GetProjectClusters(context.TODO(), project)
+				if err != nil {
+					return nil, fmt.Errorf("failed to get project clusters: %w", err)
+				}
+				return clusters, nil
 			})
-		} else {
-			managedResourcesKeys = append(managedResourcesKeys, kube.GetResourceKey(live))
-		}
-	}
-	// Process managed resources and their children, including cross-namespace relationships
-	// from cluster-scoped parents (e.g., Crossplane CompositeResourceDefinitions)
-	err = ctrl.stateCache.IterateHierarchyV2(destCluster, managedResourcesKeys, func(child appv1.ResourceNode, _ string) bool {
-		permitted, _ := proj.IsResourcePermitted(schema.GroupKind{Group: child.Group, Kind: child.Kind}, child.Name, child.Namespace, destCluster, func(project string) ([]*appv1.Cluster, error) {
-			clusters, err := ctrl.db.GetProjectClusters(context.TODO(), project)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get project clusters: %w", err)
+			if !permitted {
+				return false
 			}
-			return clusters, nil
+			nodes = append(nodes, child)
+			return true
 		})
-		if !permitted {
-			return false
+		if err != nil {
+			return nil, fmt.Errorf("failed to iterate resource hierarchy v2: %w", err)
 		}
-		nodes = append(nodes, child)
-		return true
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to iterate resource hierarchy v2: %w", err)
-	}
-	ts.AddCheckpoint("process_managed_resources_ms")
-	orphanedNodes := make([]appv1.ResourceNode, 0)
-	orphanedNodesKeys := make([]kube.ResourceKey, 0)
-	for k := range orphanedNodesMap {
-		if k.Namespace != "" && proj.IsGroupKindNamePermitted(k.GroupKind(), k.Name, true) && !isKnownOrphanedResourceExclusion(k, proj) {
-			orphanedNodesKeys = append(orphanedNodesKeys, k)
-		}
-	}
-	// Process orphaned resources
-	err = ctrl.stateCache.IterateHierarchyV2(destCluster, orphanedNodesKeys, func(child appv1.ResourceNode, appName string) bool {
-		belongToAnotherApp := false
-		if appName != "" {
-			appKey := ctrl.toAppKey(appName)
-			if _, exists, err := ctrl.appInformer.GetIndexer().GetByKey(appKey); exists && err == nil {
-				belongToAnotherApp = true
+		ts.AddCheckpoint("process_managed_resources_ms")
+		orphanedNodes := make([]appv1.ResourceNode, 0)
+		orphanedNodesKeys := make([]kube.ResourceKey, 0)
+		for k := range orphanedNodesMap {
+			if k.Namespace != "" && proj.IsGroupKindNamePermitted(k.GroupKind(), k.Name, true) && !isKnownOrphanedResourceExclusion(k, proj) {
+				orphanedNodesKeys = append(orphanedNodesKeys, k)
 			}
 		}
+		// Process orphaned resources
+		err = ctrl.stateCache.IterateHierarchyV2(destCluster, orphanedNodesKeys, func(child appv1.ResourceNode, appName string) bool {
+			belongToAnotherApp := false
+			if appName != "" {
+				appKey := ctrl.toAppKey(appName)
+				if _, exists, err := ctrl.appInformer.GetIndexer().GetByKey(appKey); exists && err == nil {
+					belongToAnotherApp = true
+				}
+			}
 
-		if belongToAnotherApp {
-			return false
-		}
+			if belongToAnotherApp {
+				return false
+			}
 
-		permitted, _ := proj.IsResourcePermitted(schema.GroupKind{Group: child.Group, Kind: child.Kind}, child.Name, child.Namespace, destCluster, func(project string) ([]*appv1.Cluster, error) {
-			return ctrl.db.GetProjectClusters(context.TODO(), project)
+			permitted, _ := proj.IsResourcePermitted(schema.GroupKind{Group: child.Group, Kind: child.Kind}, child.Name, child.Namespace, destCluster, func(project string) ([]*appv1.Cluster, error) {
+				return ctrl.db.GetProjectClusters(context.TODO(), project)
+			})
+
+			if !permitted {
+				return false
+			}
+			orphanedNodes = append(orphanedNodes, child)
+			return true
 		})
-
-		if !permitted {
-			return false
+		if err != nil {
+			return nil, err
 		}
-		orphanedNodes = append(orphanedNodes, child)
-		return true
-	})
-	if err != nil {
-		return nil, err
+
+		hosts, err := ctrl.getAppHosts(destCluster, a, nodes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get app hosts: %w", err)
+		}
+		ts.AddCheckpoint("get_app_hosts_ms")
+
+		// Attribute every node, and every parent reference, to the destination whose cluster it
+		// was read from. Without this a node in one cluster is indistinguishable from a
+		// same-named node in another and their hierarchy links appear to cross clusters.
+		for i := range nodes {
+			nodes[i].Destination = destName
+			for j := range nodes[i].ParentRefs {
+				nodes[i].ParentRefs[j].Destination = destName
+			}
+		}
+		for i := range orphanedNodes {
+			orphanedNodes[i].Destination = destName
+			for j := range orphanedNodes[i].ParentRefs {
+				orphanedNodes[i].ParentRefs[j].Destination = destName
+			}
+		}
+
+		allNodes = append(allNodes, nodes...)
+		allOrphanedNodes = append(allOrphanedNodes, orphanedNodes...)
+		allHosts = append(allHosts, hosts...)
+		warnOrphanedOverall = warnOrphanedOverall && warnOrphaned
 	}
+
+	nodes := allNodes
+	orphanedNodes := allOrphanedNodes
+	hosts := allHosts
+	warnOrphaned := warnOrphanedOverall
 
 	var conditions []appv1.ApplicationCondition
 	if len(orphanedNodes) > 0 && warnOrphaned {
@@ -679,10 +734,6 @@ func (ctrl *ApplicationController) getResourceTree(destCluster *appv1.Cluster, a
 	})
 	ts.AddCheckpoint("process_orphaned_resources_ms")
 
-	hosts, err := ctrl.getAppHosts(destCluster, a, nodes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get app hosts: %w", err)
-	}
 	ts.AddCheckpoint("get_app_hosts_ms")
 	return &appv1.ApplicationTree{Nodes: nodes, OrphanedNodes: orphanedNodes, Hosts: hosts}, nil
 }
@@ -795,7 +846,7 @@ func (ctrl *ApplicationController) getAppHosts(destCluster *appv1.Cluster, a *ap
 	return hosts, nil
 }
 
-func (ctrl *ApplicationController) hideSecretData(ctx context.Context, destCluster *appv1.Cluster, app *appv1.Application, comparisonResult *comparisonResult) ([]*appv1.ResourceDiff, error) {
+func (ctrl *ApplicationController) hideSecretData(ctx context.Context, dests map[string]argo.ResolvedDestination, app *appv1.Application, comparisonResult *comparisonResult) ([]*appv1.ResourceDiff, error) {
 	items := make([]*appv1.ResourceDiff, len(comparisonResult.managedResources))
 	for i := range comparisonResult.managedResources {
 		res := comparisonResult.managedResources[i]
@@ -806,6 +857,7 @@ func (ctrl *ApplicationController) hideSecretData(ctx context.Context, destClust
 			Kind:            res.Kind,
 			Hook:            res.Hook,
 			ResourceVersion: res.ResourceVersion,
+			Destination:     res.Destination,
 		}
 
 		target := res.Target
@@ -874,7 +926,11 @@ func (ctrl *ApplicationController) hideSecretData(ctx context.Context, destClust
 					return nil, fmt.Errorf("error getting tracking method: %w", err)
 				}
 
-				clusterCache, err := ctrl.stateCache.GetClusterCache(destCluster)
+				dest, ok := dests[res.Destination]
+				if !ok {
+					return nil, fmt.Errorf("resource %s/%s references undeclared destination %q", res.Kind, res.Name, res.Destination)
+				}
+				clusterCache, err := ctrl.stateCache.GetClusterCache(dest.Cluster)
 				if err != nil {
 					return nil, fmt.Errorf("error getting cluster cache: %w", err)
 				}
@@ -1896,12 +1952,14 @@ func (ctrl *ApplicationController) processAppRefreshQueueItem() (processNext boo
 	}()
 
 	if comparisonLevel == ComparisonWithNothing {
-		// If the destination cluster is invalid, fallback to the normal reconciliation flow
-		if destCluster, err = argo.GetDestinationCluster(ctx, app.Spec.Destination, ctrl.db); err == nil {
+		// If any destination is invalid, fall back to the normal reconciliation flow.
+		var dests map[string]argo.ResolvedDestination
+		var destOrder []string
+		if dests, destOrder, err = argo.ResolveDestinations(ctx, &app.Spec, ctrl.db); err == nil {
 			managedResources := make([]*appv1.ResourceDiff, 0)
 			if err := ctrl.cache.GetAppManagedResources(app.InstanceName(ctrl.namespace), &managedResources); err == nil {
 				var tree *appv1.ApplicationTree
-				if tree, err = ctrl.getResourceTree(destCluster, app, managedResources); err == nil {
+				if tree, err = ctrl.getResourceTree(dests, destOrder, app, managedResources); err == nil {
 					app.Status.Summary = tree.GetSummary(app)
 					if err := ctrl.cache.SetAppResourcesTree(app.InstanceName(ctrl.namespace), tree); err != nil {
 						logCtx.WithError(err).Error("Failed to cache resources tree")
@@ -1936,9 +1994,9 @@ func (ctrl *ApplicationController) processAppRefreshQueueItem() (processNext boo
 		return processNext
 	}
 
-	destCluster, err = argo.GetDestinationCluster(ctx, app.Spec.Destination, ctrl.db)
+	dests, destOrder, err := argo.ResolveDestinations(ctx, &app.Spec, ctrl.db)
 	if err != nil {
-		logCtx.WithError(err).Error("Failed to get destination cluster")
+		logCtx.WithError(err).Error("Failed to resolve destinations")
 		// exit the reconciliation. ctrl.refreshAppConditions should have caught the error
 		return processNext
 	}
@@ -1991,7 +2049,7 @@ func (ctrl *ApplicationController) processAppRefreshQueueItem() (processNext boo
 	ctrl.normalizeApplication(app)
 	ts.AddCheckpoint("normalize_application_ms")
 
-	tree, err := ctrl.setAppManagedResources(ctx, destCluster, app, compareResult)
+	tree, err := ctrl.setAppManagedResources(ctx, dests, destOrder, app, compareResult)
 	ts.AddCheckpoint("set_app_managed_resources_ms")
 	if err != nil {
 		logCtx.WithError(err).Error("Failed to cache app resources")

@@ -1839,7 +1839,7 @@ func TestGetResourceTree_HasOrphanedResources(t *testing.T) {
 			kube.NewResourceKey("apps", "Deployment", "default", "deploy2"):          {ResourceNode: orphanedDeploy2},
 		},
 	}, nil)
-	tree, err := ctrl.getResourceTree(&v1alpha1.Cluster{Server: "https://localhost:6443", Name: "fake-cluster"}, app, []*v1alpha1.ResourceDiff{{
+	tree, err := ctrl.getResourceTree(singleDest(&v1alpha1.Cluster{Server: "https://localhost:6443", Name: "fake-cluster"}), []string{argo.PrimaryDestinationName}, app, []*v1alpha1.ResourceDiff{{
 		Namespace:   "default",
 		Name:        "nginx-deployment",
 		Kind:        "Deployment",
@@ -4462,4 +4462,54 @@ func TestHandleRefreshAnnotation(t *testing.T) {
 			{Op: "remove", Path: refreshPath},
 		}, capturedPatches[0], "patch without timestamp should only remove the refresh annotation, no test op")
 	})
+}
+
+// The tree must be assembled per destination, with every node attributed to the destination whose
+// cluster it was read from.
+func TestGetResourceTreeTagsNodesByDestination(t *testing.T) {
+	app := newFakeApp()
+	proj := defaultProj.DeepCopy()
+
+	managedDeploy := v1alpha1.ResourceNode{
+		ResourceRef: v1alpha1.ResourceRef{Group: "apps", Kind: "Deployment", Namespace: "default", Name: "nginx-deployment", Version: "v1"},
+	}
+
+	ctrl := newFakeController(t.Context(), &fakeData{
+		apps: []runtime.Object{app, proj},
+		namespacedResources: map[kube.ResourceKey]namespacedResource{
+			kube.NewResourceKey("apps", "Deployment", "default", "nginx-deployment"): {ResourceNode: managedDeploy},
+		},
+	}, nil)
+
+	cluster := &v1alpha1.Cluster{Server: "https://localhost:6443", Name: "fake-cluster"}
+	dests := map[string]argo.ResolvedDestination{
+		argo.PrimaryDestinationName: {Name: argo.PrimaryDestinationName, Cluster: cluster},
+		"second":                    {Name: "second", Cluster: cluster},
+	}
+
+	tree, err := ctrl.getResourceTree(dests, []string{argo.PrimaryDestinationName, "second"}, app, []*v1alpha1.ResourceDiff{
+		{
+			Namespace: "default", Name: "nginx-deployment", Kind: "Deployment", Group: "apps",
+			LiveState: "null", TargetState: test.DeploymentManifest,
+			Destination: argo.PrimaryDestinationName,
+		},
+		{
+			Namespace: "default", Name: "other-deployment", Kind: "Deployment", Group: "apps",
+			LiveState: "null", TargetState: test.DeploymentManifest,
+			Destination: "second",
+		},
+	})
+	require.NoError(t, err)
+
+	byName := map[string]v1alpha1.ResourceNode{}
+	for _, n := range tree.Nodes {
+		byName[n.Name] = n
+	}
+	require.Contains(t, byName, "nginx-deployment")
+	require.Contains(t, byName, "other-deployment")
+
+	// Each node carries the destination its ResourceDiff was grouped under, which is what keeps
+	// same-named resources in different clusters distinguishable.
+	assert.Equal(t, argo.PrimaryDestinationName, byName["nginx-deployment"].Destination)
+	assert.Equal(t, "second", byName["other-deployment"].Destination)
 }

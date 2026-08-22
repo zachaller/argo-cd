@@ -98,7 +98,7 @@ func TestHideSecretData_SSDPathReusesMainDiff(t *testing.T) {
 		managedResources: []managedResource{mr},
 		diffConfig:       buildSSADiffConfig(t),
 	}
-	items, err := ctrl.hideSecretData(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app, compRes)
+	items, err := ctrl.hideSecretData(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), app, compRes)
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	assert.False(t, items[0].Modified)
@@ -125,7 +125,7 @@ func TestHideSecretData_SSDPathCreateRecomputes(t *testing.T) {
 		managedResources: []managedResource{mr},
 		diffConfig:       buildSSADiffConfig(t),
 	}
-	items, err := ctrl.hideSecretData(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app, compRes)
+	items, err := ctrl.hideSecretData(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), app, compRes)
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	assert.True(t, items[0].Modified)
@@ -161,7 +161,7 @@ func TestHideSecretData_SSDPathMasksSensitiveAnnotations(t *testing.T) {
 		managedResources: []managedResource{mr},
 		diffConfig:       buildSSADiffConfig(t),
 	}
-	items, err := ctrl.hideSecretData(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app, compRes)
+	items, err := ctrl.hideSecretData(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), app, compRes)
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	assert.False(t, items[0].Modified)
@@ -194,7 +194,7 @@ func TestHideSecretData_SSDPathMasksReusedSecretData(t *testing.T) {
 		managedResources: []managedResource{mr},
 		diffConfig:       buildSSADiffConfig(t),
 	}
-	items, err := ctrl.hideSecretData(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app, compRes)
+	items, err := ctrl.hideSecretData(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), app, compRes)
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	assert.False(t, items[0].Modified)
@@ -223,7 +223,7 @@ func TestHideSecretData_NonSSDRecomputes(t *testing.T) {
 	compRes := &comparisonResult{
 		managedResources: []managedResource{mr},
 	}
-	items, err := ctrl.hideSecretData(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app, compRes)
+	items, err := ctrl.hideSecretData(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), app, compRes)
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	assert.True(t, items[0].Modified)
@@ -1145,7 +1145,7 @@ func TestSetManagedResourcesWithOrphanedResources(t *testing.T) {
 		},
 	}, nil)
 
-	tree, err := ctrl.setAppManagedResources(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app, &comparisonResult{managedResources: make([]managedResource, 0)})
+	tree, err := ctrl.setAppManagedResources(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), []string{argo.PrimaryDestinationName}, app, &comparisonResult{managedResources: make([]managedResource, 0)})
 
 	require.NoError(t, err)
 	assert.Len(t, tree.OrphanedNodes, 1)
@@ -1174,7 +1174,7 @@ func TestSetManagedResourcesWithResourcesOfAnotherApp(t *testing.T) {
 		},
 	}, nil)
 
-	tree, err := ctrl.setAppManagedResources(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app1, &comparisonResult{managedResources: make([]managedResource, 0)})
+	tree, err := ctrl.setAppManagedResources(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), []string{argo.PrimaryDestinationName}, app1, &comparisonResult{managedResources: make([]managedResource, 0)})
 
 	require.NoError(t, err)
 	assert.Empty(t, tree.OrphanedNodes)
@@ -1227,7 +1227,7 @@ func TestSetManagedResourcesKnownOrphanedResourceExceptions(t *testing.T) {
 		},
 	}, nil)
 
-	tree, err := ctrl.setAppManagedResources(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app, &comparisonResult{managedResources: make([]managedResource, 0)})
+	tree, err := ctrl.setAppManagedResources(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), []string{argo.PrimaryDestinationName}, app, &comparisonResult{managedResources: make([]managedResource, 0)})
 
 	require.NoError(t, err)
 	assert.Len(t, tree.OrphanedNodes, 1)
@@ -2900,4 +2900,11 @@ func TestCompareAppStateUndeclaredDestination(t *testing.T) {
 	}
 	assert.True(t, found, "expected an InvalidSpecError naming the undeclared destination, got %v", app.Status.Conditions)
 	assert.Equal(t, v1alpha1.SyncStatusCodeUnknown, compRes.syncStatus.Status)
+}
+
+// singleDest builds the one-entry destination map that a single-destination application produces.
+func singleDest(c *v1alpha1.Cluster) map[string]argo.ResolvedDestination {
+	return map[string]argo.ResolvedDestination{
+		argo.PrimaryDestinationName: {Name: argo.PrimaryDestinationName, Cluster: c},
+	}
 }
