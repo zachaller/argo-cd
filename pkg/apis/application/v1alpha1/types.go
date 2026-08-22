@@ -1838,6 +1838,20 @@ type SyncOperationResult struct {
 	Revisions []string `json:"revisions,omitempty" protobuf:"bytes,5,opt,name=revisions"`
 	// ManagedNamespaceMetadata contains the current sync state of managed namespace metadata
 	ManagedNamespaceMetadata *ManagedNamespaceMetadata `json:"managedNamespaceMetadata,omitempty" protobuf:"bytes,6,opt,name=managedNamespaceMetadata"`
+	// WaveFrontier tracks how far a sync spanning multiple destinations has progressed through the
+	// shared sync-wave schedule. It is unset for an application with a single destination.
+	WaveFrontier *SyncWaveFrontier `json:"waveFrontier,omitempty" protobuf:"bytes,7,opt,name=waveFrontier"`
+}
+
+// SyncWaveFrontier is the point in the shared sync-wave schedule that every destination of a
+// multi-destination sync has been allowed to reach. No destination applies work beyond it until all
+// of them have finished it, which is what makes sync waves order across clusters rather than only
+// within one.
+type SyncWaveFrontier struct {
+	// Phase is the sync phase, one of PreSync, Sync or PostSync.
+	Phase string `json:"phase,omitempty" protobuf:"bytes,1,opt,name=phase"`
+	// Wave is the sync wave within that phase.
+	Wave int64 `json:"wave,omitempty" protobuf:"varint,2,opt,name=wave"`
 }
 
 // ResourceResult holds the operation result details of a specific resource

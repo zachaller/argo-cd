@@ -5281,6 +5281,20 @@ spec:
                           - repoURL
                           type: object
                         type: array
+                      waveFrontier:
+                        description: |-
+                          WaveFrontier tracks how far a sync spanning multiple destinations has progressed through the
+                          shared sync-wave schedule. It is unset for an application with a single destination.
+                        properties:
+                          phase:
+                            description: Phase is the sync phase, one of PreSync,
+                              Sync or PostSync.
+                            type: string
+                          wave:
+                            description: Wave is the sync wave within that phase.
+                            format: int64
+                            type: integer
+                        type: object
                     required:
                     - revision
                     type: object

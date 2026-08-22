@@ -27,6 +27,7 @@ import (
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v3/reposerver/apiclient"
 	"github.com/argoproj/argo-cd/v3/test"
+	"github.com/argoproj/argo-cd/v3/util/argo"
 	"github.com/argoproj/argo-cd/v3/util/argo/diff"
 	"github.com/argoproj/argo-cd/v3/util/argo/normalizers"
 	"github.com/argoproj/argo-cd/v3/util/settings"
@@ -2465,4 +2466,118 @@ func TestMergeOperationPhase(t *testing.T) {
 		mergeOperationPhase("", synccommon.OperationSucceeded))
 	assert.Equal(t, synccommon.OperationError,
 		mergeOperationPhase("", synccommon.OperationError))
+}
+
+func TestSyncStepOrdering(t *testing.T) {
+	t.Parallel()
+
+	presync0 := syncStep{phase: synccommon.SyncPhasePreSync, wave: 0}
+	sync0 := syncStep{phase: synccommon.SyncPhaseSync, wave: 0}
+	sync1 := syncStep{phase: synccommon.SyncPhaseSync, wave: 1}
+	postsync0 := syncStep{phase: synccommon.SyncPhasePostSync, wave: 0}
+
+	// Phase dominates wave: a late wave of PreSync still precedes an early wave of Sync.
+	assert.True(t, presync0.before(sync0))
+	assert.True(t, syncStep{phase: synccommon.SyncPhasePreSync, wave: 99}.before(sync0))
+	assert.True(t, sync1.before(postsync0))
+
+	// Within a phase, waves order normally, including negative ones.
+	assert.True(t, sync0.before(sync1))
+	assert.True(t, syncStep{phase: synccommon.SyncPhaseSync, wave: -5}.before(sync0))
+
+	// Ordering is strict, so a step never precedes itself.
+	assert.False(t, sync0.before(sync0))
+}
+
+func TestSyncScheduleAndFrontier(t *testing.T) {
+	t.Parallel()
+
+	obj := func(wave string, hook string) *unstructured.Unstructured {
+		u := kube.MustToUnstructured(&corev1.Pod{
+			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+			ObjectMeta: metav1.ObjectMeta{Name: "p"},
+		})
+		annots := map[string]string{}
+		if wave != "" {
+			annots[synccommon.AnnotationSyncWave] = wave
+		}
+		if hook != "" {
+			annots[synccommon.AnnotationKeyHook] = hook
+		}
+		u.SetAnnotations(annots)
+		return u
+	}
+
+	// One destination has an early wave the other lacks, and the other has a later wave. The
+	// schedule is the union, so neither can run ahead of the other.
+	perDest := map[string]*destinationComparison{
+		argo.PrimaryDestinationName: {reconciliationResult: sync.ReconciliationResult{
+			Target: []*unstructured.Unstructured{obj("0", ""), obj("2", "")},
+		}},
+		"other": {reconciliationResult: sync.ReconciliationResult{
+			Target: []*unstructured.Unstructured{obj("1", "")},
+		}},
+	}
+	schedule := syncSchedule(perDest, []string{argo.PrimaryDestinationName, "other"})
+	require.Len(t, schedule, 3)
+	assert.Equal(t, []syncStep{
+		{phase: synccommon.SyncPhaseSync, wave: 0},
+		{phase: synccommon.SyncPhaseSync, wave: 1},
+		{phase: synccommon.SyncPhaseSync, wave: 2},
+	}, schedule)
+
+	// A fresh operation starts at the first step of the schedule.
+	start, ok := frontierStep(&v1alpha1.SyncOperationResult{}, schedule)
+	require.True(t, ok)
+	assert.Equal(t, schedule[0], start)
+
+	// A recorded frontier is resumed rather than restarted.
+	resumed, ok := frontierStep(&v1alpha1.SyncOperationResult{
+		WaveFrontier: &v1alpha1.SyncWaveFrontier{Phase: string(synccommon.SyncPhaseSync), Wave: 1},
+	}, schedule)
+	require.True(t, ok)
+	assert.Equal(t, syncStep{phase: synccommon.SyncPhaseSync, wave: 1}, resumed)
+
+	// Advancing walks the schedule and stops at the end.
+	next, ok := nextFrontier(schedule, schedule[0])
+	require.True(t, ok)
+	assert.Equal(t, schedule[1], next)
+	_, ok = nextFrontier(schedule, schedule[2])
+	assert.False(t, ok, "there is nothing after the last step")
+
+	// An empty schedule yields no frontier, so an application with nothing to sync is not held.
+	_, ok = frontierStep(&v1alpha1.SyncOperationResult{}, nil)
+	assert.False(t, ok)
+}
+
+func TestDestinationStepsIncludesHookPhases(t *testing.T) {
+	t.Parallel()
+
+	presyncHook := kube.MustToUnstructured(&corev1.Pod{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{Name: "hook"},
+	})
+	presyncHook.SetAnnotations(map[string]string{
+		synccommon.AnnotationKeyHook:  string(synccommon.HookTypePreSync),
+		synccommon.AnnotationSyncWave: "4",
+	})
+
+	syncFailHook := presyncHook.DeepCopy()
+	syncFailHook.SetAnnotations(map[string]string{
+		synccommon.AnnotationKeyHook: string(synccommon.HookTypeSyncFail),
+	})
+
+	dc := &destinationComparison{reconciliationResult: sync.ReconciliationResult{
+		Hooks: []*unstructured.Unstructured{presyncHook, syncFailHook},
+	}}
+	steps := destinationSteps(dc)
+
+	assert.True(t, steps[syncStep{phase: synccommon.SyncPhasePreSync, wave: 4}],
+		"a PreSync hook contributes a PreSync step at its wave")
+
+	// SyncFail runs only after a failure, so it must never enter the schedule; a frontier that
+	// waited on it would stall every destination.
+	for step := range steps {
+		assert.NotEqual(t, synccommon.SyncPhaseSyncFail, step.phase)
+	}
 }

@@ -10969,6 +10969,9 @@
           "items": {
             "$ref": "#/definitions/v1alpha1ApplicationSource"
           }
+        },
+        "waveFrontier": {
+          "$ref": "#/definitions/v1alpha1SyncWaveFrontier"
         }
       }
     },
@@ -11086,6 +11089,21 @@
       "properties": {
         "syncStrategyApply": {
           "$ref": "#/definitions/v1alpha1SyncStrategyApply"
+        }
+      }
+    },
+    "v1alpha1SyncWaveFrontier": {
+      "description": "SyncWaveFrontier is the point in the shared sync-wave schedule that every destination of a\nmulti-destination sync has been allowed to reach. No destination applies work beyond it until all\nof them have finished it, which is what makes sync waves order across clusters rather than only\nwithin one.",
+      "type": "object",
+      "properties": {
+        "phase": {
+          "description": "Phase is the sync phase, one of PreSync, Sync or PostSync.",
+          "type": "string"
+        },
+        "wave": {
+          "description": "Wave is the sync wave within that phase.",
+          "type": "integer",
+          "format": "int64"
         }
       }
     },

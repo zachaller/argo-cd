@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	gitopsDiff "github.com/argoproj/argo-cd/gitops-engine/v3/pkg/diff"
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/sync"
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/sync/common"
+	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/sync/syncwaves"
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube"
 	jsonpatch "github.com/evanphx/json-patch"
 	log "github.com/sirupsen/logrus"
@@ -311,6 +313,24 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 		mergedMessages []string
 	)
 
+	// Sync waves have to hold across destinations, not just within one: a resource in wave 1 of one
+	// cluster must not apply before wave 0 has finished in every cluster. Each destination is
+	// therefore held at a shared frontier and only allowed to work at or before it.
+	//
+	// A single-destination application takes no frontier at all, so its behaviour is untouched.
+	var (
+		schedule     []syncStep
+		frontier     syncStep
+		haveFrontier bool
+	)
+	if len(compareResult.destOrder) > 1 {
+		schedule = syncSchedule(compareResult.perDestination, compareResult.destOrder)
+		frontier, haveFrontier = frontierStep(state.SyncResult, schedule)
+	}
+	// Whether any destination still had work at or before the frontier this pass. While that is
+	// true the frontier stays put; once no destination does, every one of them has finished it.
+	frontierHasPendingWork := false
+
 	for _, destName := range compareResult.destOrder {
 		dest, ok := compareResult.resolvedDests[destName]
 		if !ok {
@@ -328,6 +348,21 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 			installationID:         installationID,
 			trackingMethod:         trackingMethod,
 			initialResourcesRes:    initialByDest[destName],
+		}
+		if haveFrontier {
+			ss.syncTaskFilter = func(phase common.SyncPhase, wave int) bool {
+				// SyncFail runs only when something has already failed; holding it back would
+				// prevent cleanup rather than order it.
+				if phase == common.SyncPhaseSyncFail {
+					return true
+				}
+				step := syncStep{phase: phase, wave: wave}
+				if frontier.before(step) {
+					return false
+				}
+				frontierHasPendingWork = true
+				return true
+			}
 		}
 
 		outcome, ok := m.syncDestination(ctx, app, project, state, compareResult, dest, dc, syncOp, ss, logEntry)
@@ -384,6 +419,25 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 
 	state.Phase = mergedPhase
 	state.Message = strings.Join(mergedMessages, "; ")
+
+	if haveFrontier {
+		// Advance only when every destination has finished the current step. Whatever the merged
+		// phase says, an operation with steps still ahead of it is not finished.
+		if !frontierHasPendingWork {
+			if next, ok := nextFrontier(schedule, frontier); ok {
+				frontier = next
+			}
+		}
+		if _, more := nextFrontier(schedule, frontier); more || frontierHasPendingWork {
+			if state.Phase == common.OperationSucceeded {
+				state.Phase = common.OperationRunning
+			}
+		}
+		state.SyncResult.WaveFrontier = &v1alpha1.SyncWaveFrontier{
+			Phase: string(frontier.phase),
+			Wave:  int64(frontier.wave),
+		}
+	}
 
 	logEntry.WithField("duration", time.Since(start)).Info("sync/terminate complete")
 
@@ -716,6 +770,9 @@ type syncSettings struct {
 	installationID         string
 	trackingMethod         string
 	initialResourcesRes    []common.ResourceSyncResult
+	// syncTaskFilter, when set, holds back tasks beyond the shared wave frontier. It is nil for a
+	// single-destination application, which needs no coordination.
+	syncTaskFilter func(phase common.SyncPhase, wave int) bool
 }
 
 // destinationSyncOutcome is what one destination's sync pass produced.
@@ -875,6 +932,10 @@ func (m *appStateManager) syncDestination(
 		sync.WithSkipDryRunOnMissingResource(syncOp.SyncOptions.HasOption(common.SyncOptionSkipDryRunOnMissingResource)),
 	}
 
+	if ss.syncTaskFilter != nil {
+		opts = append(opts, sync.WithSyncTaskFilter(ss.syncTaskFilter))
+	}
+
 	if syncOp.SyncOptions.HasOption("CreateNamespace=true") {
 		opts = append(opts, sync.WithNamespaceModifier(syncNamespace(app.Spec.SyncPolicy)))
 	}
@@ -905,4 +966,109 @@ func (m *appStateManager) syncDestination(
 	state.Phase, state.Message, resState = syncCtx.GetState()
 
 	return destinationSyncOutcome{resources: resState, cluster: destCluster, logEntry: logEntry}, true
+}
+
+// phaseOrder ranks sync phases in the order the engine executes them. SyncFail is deliberately
+// absent: it runs only on failure and must never be held back by the frontier.
+func phaseOrder(p common.SyncPhase) int {
+	switch p {
+	case common.SyncPhasePreSync:
+		return 0
+	case common.SyncPhaseSync:
+		return 1
+	case common.SyncPhasePostSync:
+		return 2
+	default:
+		return 3
+	}
+}
+
+// syncStep is one point in the sync-wave schedule shared by an application's destinations.
+type syncStep struct {
+	phase common.SyncPhase
+	wave  int
+}
+
+// before reports whether s comes strictly before other in execution order.
+func (s syncStep) before(other syncStep) bool {
+	if po, oo := phaseOrder(s.phase), phaseOrder(other.phase); po != oo {
+		return po < oo
+	}
+	return s.wave < other.wave
+}
+
+// destinationSteps returns every step a destination's objects will produce tasks in.
+//
+// Waves come from the sync-wave annotation and phases from the engine's own SyncPhases, so this
+// matches how the engine schedules ordinary work. Prune and prune-last tasks are the exception: the
+// engine rewrites their waves internally, so they cannot be predicted here and are left out. That is
+// deliberate -- the frontier exists to order applying resources across clusters, and admitting a
+// wave that never actually arrives would stall every destination behind it.
+func destinationSteps(dc *destinationComparison) map[syncStep]bool {
+	steps := map[syncStep]bool{}
+	collect := func(obj *unstructured.Unstructured) {
+		if obj == nil {
+			return
+		}
+		wave := syncwaves.Wave(obj)
+		for _, phase := range sync.SyncPhases(obj) {
+			if phase == common.SyncPhaseSyncFail {
+				continue
+			}
+			steps[syncStep{phase: phase, wave: wave}] = true
+		}
+	}
+	for _, obj := range dc.reconciliationResult.Target {
+		collect(obj)
+	}
+	for _, obj := range dc.reconciliationResult.Hooks {
+		collect(obj)
+	}
+	return steps
+}
+
+// syncSchedule is the ordered union of the steps of every destination: the sequence a
+// multi-destination sync advances through, one step at a time, in lockstep.
+func syncSchedule(perDestination map[string]*destinationComparison, destOrder []string) []syncStep {
+	all := map[syncStep]bool{}
+	for _, name := range destOrder {
+		dc, ok := perDestination[name]
+		if !ok {
+			continue
+		}
+		for step := range destinationSteps(dc) {
+			all[step] = true
+		}
+	}
+	schedule := make([]syncStep, 0, len(all))
+	for step := range all {
+		schedule = append(schedule, step)
+	}
+	sort.Slice(schedule, func(i, j int) bool { return schedule[i].before(schedule[j]) })
+	return schedule
+}
+
+// frontierStep reads the frontier recorded on the operation, defaulting to the first step of the
+// schedule when a sync has not started advancing yet.
+func frontierStep(result *v1alpha1.SyncOperationResult, schedule []syncStep) (syncStep, bool) {
+	if len(schedule) == 0 {
+		return syncStep{}, false
+	}
+	if result == nil || result.WaveFrontier == nil {
+		return schedule[0], true
+	}
+	return syncStep{
+		phase: common.SyncPhase(result.WaveFrontier.Phase),
+		wave:  int(result.WaveFrontier.Wave),
+	}, true
+}
+
+// nextFrontier returns the step after the given one, and whether one exists.
+func nextFrontier(schedule []syncStep, current syncStep) (syncStep, bool) {
+	for _, step := range schedule {
+		if current.before(step) {
+			return step, true
+		}
+	}
+	return syncStep{}, false
 }

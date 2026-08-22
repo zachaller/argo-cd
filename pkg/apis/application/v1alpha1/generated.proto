@@ -2838,6 +2838,10 @@ message SyncOperationResult {
 
   // ManagedNamespaceMetadata contains the current sync state of managed namespace metadata
   optional ManagedNamespaceMetadata managedNamespaceMetadata = 6;
+
+  // WaveFrontier tracks how far a sync spanning multiple destinations has progressed through the
+  // shared sync-wave schedule. It is unset for an application with a single destination.
+  optional SyncWaveFrontier waveFrontier = 7;
 }
 
 // SyncPolicy controls when a sync will be performed in response to updates in git
@@ -2929,6 +2933,18 @@ message SyncStrategyHook {
   // Embed SyncStrategyApply type to inherit any `apply` options
   // +optional
   optional SyncStrategyApply syncStrategyApply = 1;
+}
+
+// SyncWaveFrontier is the point in the shared sync-wave schedule that every destination of a
+// multi-destination sync has been allowed to reach. No destination applies work beyond it until all
+// of them have finished it, which is what makes sync waves order across clusters rather than only
+// within one.
+message SyncWaveFrontier {
+  // Phase is the sync phase, one of PreSync, Sync or PostSync.
+  optional string phase = 1;
+
+  // Wave is the sync wave within that phase.
+  optional int64 wave = 2;
 }
 
 // SyncWindow contains the kind, time, duration and attributes that are used to assign the syncWindows to apps

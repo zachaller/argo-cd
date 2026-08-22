@@ -7,7 +7,13 @@ import (
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/sync/hook"
 )
 
-func syncPhases(obj *unstructured.Unstructured) []common.SyncPhase {
+// SyncPhases returns the phases a resource participates in: the sync phase for ordinary resources,
+// and whichever of PreSync, Sync, PostSync and SyncFail a hook declares. A resource marked to be
+// skipped participates in none.
+//
+// It is exported so that a caller coordinating several sync contexts can work out which phases an
+// object will produce tasks in before running them.
+func SyncPhases(obj *unstructured.Unstructured) []common.SyncPhase {
 	if hook.Skip(obj) {
 		return nil
 	} else if hook.IsHook(obj) {
@@ -25,4 +31,8 @@ func syncPhases(obj *unstructured.Unstructured) []common.SyncPhase {
 		return phases
 	}
 	return []common.SyncPhase{common.SyncPhaseSync}
+}
+
+func syncPhases(obj *unstructured.Unstructured) []common.SyncPhase {
+	return SyncPhases(obj)
 }
