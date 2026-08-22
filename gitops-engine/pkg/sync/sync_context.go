@@ -126,6 +126,22 @@ func WithSyncTaskFilter(syncTaskFilter func(phase common.SyncPhase, wave int) bo
 	}
 }
 
+// WithForceSyncFailPhase makes the sync run its SyncFail hooks and fail with the given reason even
+// though none of this context's own tasks failed. An empty reason leaves the behaviour unchanged.
+//
+// The SyncFail phase normally triggers only on a task of this context failing, which is not enough
+// for a caller driving several sync contexts as one operation: when one of them fails the others
+// have nothing of their own to trigger on, so their SyncFail hooks never run and whatever they
+// applied is left uncleaned. Such a caller sets this on the contexts that did not themselves fail.
+//
+// The reason is carried rather than a bare bool because only the caller knows why: the context
+// being failed has no failed task to derive a message from.
+func WithForceSyncFailPhase(reason string) SyncOpt {
+	return func(ctx *syncContext) {
+		ctx.forceSyncFailPhaseReason = reason
+	}
+}
+
 func WithResourcesFilter(resourcesFilter func(key kubeutil.ResourceKey, target *unstructured.Unstructured, live *unstructured.Unstructured) bool) SyncOpt {
 	return func(ctx *syncContext) {
 		ctx.resourcesFilter = resourcesFilter
@@ -420,6 +436,7 @@ type syncContext struct {
 	skipHooks                       bool
 	resourcesFilter                 func(key kubeutil.ResourceKey, target *unstructured.Unstructured, live *unstructured.Unstructured) bool
 	syncTaskFilter                  func(phase common.SyncPhase, wave int) bool
+	forceSyncFailPhaseReason        string
 	prune                           bool
 	replace                         bool
 	serverSideApply                 bool
@@ -666,9 +683,16 @@ func (sc *syncContext) Sync(ctx context.Context) {
 
 	// if there are any completed but unsuccessful tasks, sync is a failure.
 	// we already know tasks do not contain running tasks
-	if tasks.Any(func(t *syncTask) bool { return t.completed() && !t.successful() }) {
+	ownTasksFailed := tasks.Any(func(t *syncTask) bool { return t.completed() && !t.successful() })
+	if ownTasksFailed || sc.forceSyncFailPhaseReason != "" {
+		message := "one or more synchronization tasks completed unsuccessfully"
+		if !ownTasksFailed {
+			// Nothing here failed, so there is no task message to build a reason from. The caller is
+			// failing this context on another's behalf and is the only one that knows why.
+			message = sc.forceSyncFailPhaseReason
+		}
 		sc.deleteHooks(ctx, hooksPendingDeletionFailed)
-		sc.executeSyncFailPhase(ctx, syncFailTasks, syncFailedTasks, "one or more synchronization tasks completed unsuccessfully")
+		sc.executeSyncFailPhase(ctx, syncFailTasks, syncFailedTasks, message)
 		return
 	}
 
