@@ -3344,12 +3344,13 @@ func TestSyncTaskFilterHoldsTasksBack(t *testing.T) {
 		})
 
 		syncCtx.Sync(context.Background())
-		phase, _, resources := syncCtx.GetState()
+		phase, message, resources := syncCtx.GetState()
 
-		// Holding a task back must leave it pending, not mark it failed or skipped: the
-		// coordinating caller will let it through on a later pass.
-		assert.NotEqual(t, synccommon.OperationFailed, phase)
-		assert.NotEqual(t, synccommon.OperationError, phase)
+		// Running, specifically. Holding every task back empties the task list, and the engine
+		// otherwise reads an empty list as "successfully synced (no more tasks)" -- which would
+		// report a sync as finished while its work is still outstanding.
+		assert.Equal(t, synccommon.OperationRunning, phase)
+		assert.Contains(t, message, "held back")
 		assert.Empty(t, resources, "a held-back task must not produce a result")
 	})
 

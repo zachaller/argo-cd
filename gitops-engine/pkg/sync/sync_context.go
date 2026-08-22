@@ -511,11 +511,6 @@ func (sc *syncContext) Sync(ctx context.Context) {
 	defer span.End()
 	sc.log.WithValues("skipHooks", sc.skipHooks, "started", sc.started()).Info("Syncing")
 	tasks, ok := sc.getSyncTasks(ctx)
-	if ok && sc.syncTaskFilter != nil {
-		// Held-back tasks stay pending rather than being failed or skipped, so the operation
-		// remains Running and they are reconsidered on the next pass.
-		tasks = tasks.Filter(func(t *syncTask) bool { return sc.syncTaskFilter(t.phase, t.wave()) })
-	}
 	if !ok {
 		// Collect distinct error messages from failed resource results so that the
 		// operation phase message surfaces the actual root cause (e.g. cluster API
@@ -685,9 +680,30 @@ func (sc *syncContext) Sync(ctx context.Context) {
 		tasks = sc.filterOutOfSyncTasks(tasks)
 	}
 
+	// Let the caller hold tasks back. This runs on pending tasks only, and after syncFailTasks have
+	// been split out, so failure handling is never delayed by it.
+	heldBack := false
+	if sc.syncTaskFilter != nil {
+		allowed := syncTasks{}
+		for _, t := range tasks {
+			if sc.syncTaskFilter(t.phase, t.wave()) {
+				allowed = append(allowed, t)
+			} else {
+				heldBack = true
+			}
+		}
+		tasks = allowed
+	}
+
 	// If no sync tasks were generated (e.g., in case all application manifests have been removed),
 	// the sync operation is successful.
 	if len(tasks) == 0 {
+		if heldBack {
+			// There is outstanding work; the caller is holding it back. Staying Running is what
+			// distinguishes this from a finished sync, so the caller can release it on a later pass.
+			sc.setOperationPhase(common.OperationRunning, "waiting for held back tasks")
+			return
+		}
 		// delete all completed hooks which have appropriate delete policy
 		sc.deleteHooks(ctx, hooksPendingDeletionSuccessful)
 		sc.setOperationPhase(common.OperationSucceeded, "successfully synced (no more tasks)")
