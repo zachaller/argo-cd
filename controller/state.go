@@ -89,6 +89,34 @@ type managedResource struct {
 	Name            string
 	Hook            bool
 	ResourceVersion string
+	// Destination names the Application destination this resource belongs to. Empty means the
+	// primary spec.destination.
+	Destination string
+}
+
+// diffCacheKey namespaces the diff cache by destination. The cache is keyed by resource identity
+// within an application, and the same group/kind/namespace/name may legitimately exist in two
+// destinations, so without this the two would share a cache entry. The primary destination keeps
+// the bare application name so existing cache entries stay valid across an upgrade.
+func diffCacheKey(appInstanceName, destName string) string {
+	if destName == argo.PrimaryDestinationName {
+		return appInstanceName
+	}
+	return appInstanceName + "/" + destName
+}
+
+// mergeSyncStatusCode combines the sync status of two destinations into a status for the whole
+// application, keeping the least healthy of the two: an application is Unknown if any destination
+// is Unknown, and OutOfSync if any destination is OutOfSync.
+func mergeSyncStatusCode(a, b v1alpha1.SyncStatusCode) v1alpha1.SyncStatusCode {
+	switch {
+	case a == v1alpha1.SyncStatusCodeUnknown || b == v1alpha1.SyncStatusCodeUnknown:
+		return v1alpha1.SyncStatusCodeUnknown
+	case a == v1alpha1.SyncStatusCodeOutOfSync || b == v1alpha1.SyncStatusCodeOutOfSync:
+		return v1alpha1.SyncStatusCodeOutOfSync
+	default:
+		return v1alpha1.SyncStatusCodeSynced
+	}
 }
 
 // AppStateManager defines methods which allow to compare application spec and actual application state.
@@ -108,7 +136,12 @@ type comparisonResult struct {
 	managedResources     []managedResource
 	reconciliationResult sync.ReconciliationResult
 	diffConfig           argodiff.DiffConfig
-	appSourceType        v1alpha1.ApplicationSourceType
+	// perDestination holds each destination's comparison, keyed by destination name, and destOrder
+	// gives a stable iteration order (primary first). The sync stage builds one SyncContext per
+	// entry.
+	perDestination map[string]*destinationComparison
+	destOrder      []string
+	appSourceType  v1alpha1.ApplicationSourceType
 	// appSourceTypes stores the SourceType for each application source under sources field
 	appSourceTypes []v1alpha1.ApplicationSourceType
 	// timings maps phases of comparison to the duration it took to complete (for statistical purposes)
@@ -718,12 +751,19 @@ func (m *appStateManager) CompareAppState(ctx context.Context, app *v1alpha1.App
 	failedToLoadObjs := false
 	conditions := make([]v1alpha1.ApplicationCondition, 0)
 
-	destCluster, err := argo.GetDestinationCluster(ctx, app.Spec.Destination, m.db)
+	// Resolve every destination the application may deploy to. The primary spec.destination is
+	// always present under argo.PrimaryDestinationName; named destinations follow in declaration
+	// order. Resolution is all-or-nothing so a partially resolved application is never compared.
+	resolvedDests, destOrder, err := argo.ResolveDestinations(ctx, &app.Spec, m.db)
 	if err != nil {
 		return nil, err
 	}
 
-	logCtx.Infof("Comparing app state (cluster: %s, namespace: %s)", app.Spec.Destination.Server, app.Spec.Destination.Namespace)
+	if len(destOrder) > 1 {
+		logCtx.Infof("Comparing app state across %d destinations", len(destOrder))
+	} else {
+		logCtx.Infof("Comparing app state (cluster: %s, namespace: %s)", app.Spec.Destination.Server, app.Spec.Destination.Namespace)
+	}
 
 	var targetObjs []*unstructured.Unstructured
 	now := metav1.Now()
@@ -807,7 +847,22 @@ func (m *appStateManager) CompareAppState(ctx context.Context, app *v1alpha1.App
 
 	useDiffCache := useDiffCache(noCache, manifestInfos, sources, app, manifestRevisions, m.statusRefreshTimeout, serverSideDiff, logCtx)
 
-	dc := m.compareDestination(ctx, app, project, destCluster, targetObjs, comparisonSettings{
+	// Route each manifest to the destination its annotation names. A manifest naming a destination
+	// the application does not declare is dropped and reported rather than falling back to the
+	// primary destination: deploying a resource to the wrong cluster is worse than not deploying it.
+	partitions, partitionErrs := argo.PartitionByDestination(targetObjs, resolvedDests)
+	for _, msg := range partitionErrs {
+		conditions = append(conditions, v1alpha1.ApplicationCondition{
+			Type:               v1alpha1.ApplicationConditionInvalidSpecError,
+			Message:            msg,
+			LastTransitionTime: &now,
+		})
+		// Fail closed: an application that cannot place all of its resources must not report a
+		// meaningful sync status, and must not sync.
+		failedToLoadObjs = true
+	}
+
+	cs := comparisonSettings{
 		appLabelKey:       appLabelKey,
 		resourceOverrides: resourceOverrides,
 		resFilter:         resFilter,
@@ -818,18 +873,45 @@ func (m *appStateManager) CompareAppState(ctx context.Context, app *v1alpha1.App
 		useDiffCache:      useDiffCache,
 		now:               now,
 		failedToLoadObjs:  failedToLoadObjs,
-	}, logCtx, ts)
+	}
 
-	conditions = append(conditions, dc.conditions...)
-	failedToLoadObjs = dc.failedToLoadObjs
-	reconciliation := dc.reconciliationResult
-	diffConfig := dc.diffConfig
-	diffResults := dc.diffResultList
-	managedResources := dc.managedResources
-	resourceSummaries := dc.resources
-	syncCode := dc.syncCode
-	hasPreDeleteHooks := dc.hasPreDeleteHooks
-	hasPostDeleteHooks := dc.hasPostDeleteHooks
+	var (
+		managedResources   []managedResource
+		resourceSummaries  []v1alpha1.ResourceStatus
+		hasPreDeleteHooks  bool
+		hasPostDeleteHooks bool
+	)
+	syncCode := v1alpha1.SyncStatusCodeSynced
+	perDestination := make(map[string]*destinationComparison, len(destOrder))
+
+	// Destinations are compared in a stable order (primary first, then declared order) so that
+	// app.Status.Resources does not churn between reconciles.
+	for _, destName := range destOrder {
+		dest := resolvedDests[destName]
+		dc := m.compareDestination(ctx, app, project, dest, partitions[destName], cs, logCtx, ts)
+
+		conditions = append(conditions, dc.conditions...)
+		failedToLoadObjs = failedToLoadObjs || dc.failedToLoadObjs
+		hasPreDeleteHooks = hasPreDeleteHooks || dc.hasPreDeleteHooks
+		hasPostDeleteHooks = hasPostDeleteHooks || dc.hasPostDeleteHooks
+		syncCode = mergeSyncStatusCode(syncCode, dc.syncCode)
+
+		for i := range dc.managedResources {
+			dc.managedResources[i].Destination = destName
+		}
+		for i := range dc.resources {
+			dc.resources[i].Destination = destName
+		}
+		managedResources = append(managedResources, dc.managedResources...)
+		resourceSummaries = append(resourceSummaries, dc.resources...)
+
+		perDestination[destName] = &dc
+	}
+
+	primary := perDestination[argo.PrimaryDestinationName]
+	reconciliation := primary.reconciliationResult
+	diffConfig := primary.diffConfig
+	diffResults := primary.diffResultList
 
 	if failedToLoadObjs {
 		syncCode = v1alpha1.SyncStatusCodeUnknown
@@ -889,6 +971,8 @@ func (m *appStateManager) CompareAppState(ctx context.Context, app *v1alpha1.App
 		managedResources:        managedResources,
 		reconciliationResult:    reconciliation,
 		diffConfig:              diffConfig,
+		perDestination:          perDestination,
+		destOrder:               destOrder,
 		diffResultList:          diffResults,
 		hasPostDeleteHooks:      hasPostDeleteHooks,
 		hasPreDeleteHooks:       hasPreDeleteHooks,
@@ -1180,12 +1264,17 @@ func (m *appStateManager) compareDestination(
 	ctx context.Context,
 	app *v1alpha1.Application,
 	project *v1alpha1.AppProject,
-	destCluster *v1alpha1.Cluster,
+	dest argo.ResolvedDestination,
 	targetObjs []*unstructured.Unstructured,
 	cs comparisonSettings,
 	logCtx *log.Entry,
 	ts *stats.TimingStats,
 ) destinationComparison {
+	destCluster := dest.Cluster
+	// The destination's namespace, not the application's: a resource routed to a named destination
+	// is defaulted into that destination's namespace and its tracking annotation must record the
+	// same namespace, or isSelfReferencedObj will reject it at sync time.
+	destNamespace := dest.Destination.Namespace
 	appLabelKey := cs.appLabelKey
 	resourceOverrides := cs.resourceOverrides
 	resFilter := cs.resFilter
@@ -1207,8 +1296,8 @@ func (m *appStateManager) compareDestination(
 		infoProvider = &resourceInfoProviderStub{}
 	}
 
-	targetObjs, dedupConditions, err := NormalizeTargetObjects(app.Spec.Destination.Namespace, targetObjs, infoProvider, func(u *unstructured.Unstructured) error {
-		return m.resourceTracking.SetAppInstance(u, appLabelKey, app.InstanceName(m.namespace), app.Spec.Destination.Namespace, v1alpha1.TrackingMethod(trackingMethod), installationID)
+	targetObjs, dedupConditions, err := NormalizeTargetObjects(destNamespace, targetObjs, infoProvider, func(u *unstructured.Unstructured) error {
+		return m.resourceTracking.SetAppInstance(u, appLabelKey, app.InstanceName(m.namespace), destNamespace, v1alpha1.TrackingMethod(trackingMethod), installationID)
 	})
 	if err != nil {
 		msg := "Failed to normalize target state: " + err.Error()
@@ -1313,7 +1402,7 @@ func (m *appStateManager) compareDestination(
 	}
 	targetObjsForSync, hasPreDeleteHooks, hasPostDeleteHooks := partitionTargetObjsForSync(targetObjs)
 
-	reconciliation := sync.Reconcile(targetObjsForSync, liveObjByKey, app.Spec.Destination.Namespace, infoProvider)
+	reconciliation := sync.Reconcile(targetObjsForSync, liveObjByKey, destNamespace, infoProvider)
 	ts.AddCheckpoint("live_ms")
 
 	diffConfigBuilder := argodiff.NewDiffConfigBuilder().
@@ -1321,7 +1410,7 @@ func (m *appStateManager) compareDestination(
 		WithTracking(appLabelKey, string(trackingMethod))
 
 	if useDiffCache {
-		diffConfigBuilder.WithCache(m.cache, app.InstanceName(m.namespace))
+		diffConfigBuilder.WithCache(m.cache, diffCacheKey(app.InstanceName(m.namespace), dest.Name))
 	} else {
 		diffConfigBuilder.WithNoCache()
 	}

@@ -34,6 +34,7 @@ import (
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v3/reposerver/apiclient"
 	"github.com/argoproj/argo-cd/v3/test"
+	"github.com/argoproj/argo-cd/v3/util/argo"
 	argodiff "github.com/argoproj/argo-cd/v3/util/argo/diff"
 	"github.com/argoproj/argo-cd/v3/util/argo/normalizers"
 )
@@ -2789,4 +2790,114 @@ func Test_EvaluateAppRevisionsChanges(t *testing.T) {
 			assert.Equal(t, tc.expectedResolvedRevisions, resolvedRevisions)
 		})
 	}
+}
+
+// multiDestPod builds a Pod manifest, optionally annotated for a named destination.
+func multiDestPod(name, destination string) *unstructured.Unstructured {
+	pod := kube.MustToUnstructured(&corev1.Pod{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+	})
+	if destination != "" {
+		pod.SetAnnotations(map[string]string{common.AnnotationKeyDestination: destination})
+	}
+	return pod
+}
+
+// Two destinations on the same cluster but in different namespaces. This is the cheapest genuine
+// multi-destination setup: distinct (server, namespace) pairs, so it passes the distinctness rule
+// while still exercising per-destination routing, namespacing and tagging.
+func TestCompareAppStateMultipleDestinations(t *testing.T) {
+	t.Parallel()
+
+	app := newFakeApp()
+	// Same registered cluster as spec.destination, different namespace: a distinct
+	// (server, namespace) pair, so it satisfies the distinctness rule.
+	app.Spec.Destinations = []v1alpha1.NamedDestination{{
+		Name:      "other",
+		Server:    app.Spec.Destination.Server,
+		Namespace: "other-ns",
+	}}
+
+	data := fakeData{
+		manifestResponse: &apiclient.ManifestResponse{
+			Manifests: []string{
+				toJSON(t, multiDestPod("primary-pod", "")),
+				toJSON(t, multiDestPod("other-pod", "other")),
+			},
+			Namespace: test.FakeDestNamespace,
+			Server:    test.FakeClusterURL,
+			Revision:  "abc123",
+		},
+		managedLiveObjs: make(map[kube.ResourceKey]*unstructured.Unstructured),
+	}
+	ctrl := newFakeController(t.Context(), &data, nil)
+
+	compRes, err := ctrl.appStateManager.CompareAppState(
+		t.Context(), app, &defaultProj, []string{""}, []v1alpha1.ApplicationSource{app.Spec.GetSource()}, false, false, nil, false)
+	require.NoError(t, err)
+	require.NotNil(t, compRes)
+
+	// Both destinations were compared, primary first.
+	assert.Equal(t, []string{argo.PrimaryDestinationName, "other"}, compRes.destOrder)
+	require.Len(t, compRes.perDestination, 2)
+
+	byName := map[string]v1alpha1.ResourceStatus{}
+	for _, r := range compRes.resources {
+		byName[r.Name] = r
+	}
+	require.Contains(t, byName, "primary-pod")
+	require.Contains(t, byName, "other-pod")
+
+	// Each resource is attributed to the destination that its annotation selected.
+	assert.Equal(t, argo.PrimaryDestinationName, byName["primary-pod"].Destination)
+	assert.Equal(t, "other", byName["other-pod"].Destination)
+
+	// And defaulted into that destination's namespace, not the application's.
+	assert.Equal(t, test.FakeDestNamespace, byName["primary-pod"].Namespace)
+	assert.Equal(t, "other-ns", byName["other-pod"].Namespace)
+
+	// managedResources carry the same attribution, which is what the sync stage routes on.
+	for _, mr := range compRes.managedResources {
+		switch mr.Name {
+		case "primary-pod":
+			assert.Equal(t, argo.PrimaryDestinationName, mr.Destination)
+		case "other-pod":
+			assert.Equal(t, "other", mr.Destination)
+		}
+	}
+}
+
+func TestCompareAppStateUndeclaredDestination(t *testing.T) {
+	t.Parallel()
+
+	app := newFakeApp()
+	data := fakeData{
+		manifestResponse: &apiclient.ManifestResponse{
+			Manifests: []string{toJSON(t, multiDestPod("stray-pod", "nope"))},
+			Namespace: test.FakeDestNamespace,
+			Server:    test.FakeClusterURL,
+			Revision:  "abc123",
+		},
+		managedLiveObjs: make(map[kube.ResourceKey]*unstructured.Unstructured),
+	}
+	ctrl := newFakeController(t.Context(), &data, nil)
+
+	compRes, err := ctrl.appStateManager.CompareAppState(
+		t.Context(), app, &defaultProj, []string{""}, []v1alpha1.ApplicationSource{app.Spec.GetSource()}, false, false, nil, false)
+	require.NoError(t, err)
+	require.NotNil(t, compRes)
+
+	// The resource must not be silently routed to the primary destination.
+	assert.Empty(t, compRes.managedResources)
+
+	// It must be reported, and the app must fail closed rather than claim a sync status.
+	var found bool
+	for _, c := range app.Status.Conditions {
+		if c.Type == v1alpha1.ApplicationConditionInvalidSpecError && strings.Contains(c.Message, "nope") {
+			found = true
+		}
+	}
+	assert.True(t, found, "expected an InvalidSpecError naming the undeclared destination, got %v", app.Status.Conditions)
+	assert.Equal(t, v1alpha1.SyncStatusCodeUnknown, compRes.syncStatus.Status)
 }
