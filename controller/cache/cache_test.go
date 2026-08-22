@@ -24,6 +24,7 @@ import (
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube"
 	"github.com/stretchr/testify/mock"
 	"k8s.io/client-go/kubernetes/fake"
+	k8scache "k8s.io/client-go/tools/cache"
 
 	"github.com/argoproj/argo-cd/v3/common"
 	"github.com/argoproj/argo-cd/v3/controller/metrics"
@@ -986,4 +987,112 @@ func Test_asResourceNode_same_namespace_parent(t *testing.T) {
 	assert.Equal(t, "Deployment", resNode.ParentRefs[0].Kind)
 	assert.Equal(t, "my-deployment", resNode.ParentRefs[0].Name)
 	assert.Equal(t, "my-namespace", resNode.ParentRefs[0].Namespace, "Deployment parent should have same namespace")
+}
+
+// stubAppInformer is a SharedIndexInformer that only serves a fixed store, which is all
+// ownedAppReferencesCluster and isClusterHasApps use.
+type stubAppInformer struct {
+	k8scache.SharedIndexInformer
+	store k8scache.Store
+}
+
+func (s *stubAppInformer) GetStore() k8scache.Store { return s.store }
+
+func newStubAppInformer(apps ...*appv1.Application) *stubAppInformer {
+	store := k8scache.NewStore(k8scache.MetaNamespaceKeyFunc)
+	for _, app := range apps {
+		_ = store.Add(app)
+	}
+	return &stubAppInformer{store: store}
+}
+
+func appWithDestinations(name, primaryServer string, named ...appv1.NamedDestination) *appv1.Application {
+	return &appv1.Application{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "argocd"},
+		Spec: appv1.ApplicationSpec{
+			Destination:  appv1.ApplicationDestination{Server: primaryServer, Namespace: "default"},
+			Destinations: named,
+		},
+	}
+}
+
+// A cluster this shard does not own must still be reachable when an application the shard *does*
+// own names it as an additional destination. Without this the owning shard cannot read that
+// cluster's live state and the application can never be compared.
+func TestCanHandleCluster_SecondaryDestinationOfOwnedApp(t *testing.T) {
+	t.Parallel()
+
+	const owned = "https://owned-cluster"
+	const secondary = "https://secondary-cluster"
+
+	db := &dbmocks.ArgoDB{}
+	db.EXPECT().GetApplicationControllerReplicas().Return(1).Maybe()
+	db.EXPECT().GetCluster(mock.Anything, owned).Return(&appv1.Cluster{Server: owned}, nil).Maybe()
+	db.EXPECT().GetCluster(mock.Anything, secondary).Return(&appv1.Cluster{Server: secondary}, nil).Maybe()
+
+	app := appWithDestinations("multi", owned, appv1.NamedDestination{
+		Name: "second", Server: secondary, Namespace: "other",
+	})
+
+	c := liveStateCache{
+		db:              db,
+		appInformer:     newStubAppInformer(app),
+		clusterSharding: sharding.NewClusterSharding(db, 0, 1, common.DefaultShardingAlgorithm),
+	}
+
+	// Assert the escape hatch itself, not canHandleCluster: with a single replica the shard manages
+	// every cluster, so canHandleCluster would return true via IsManagedCluster and the assertion
+	// would pass without ever exercising this logic.
+	require.True(t, c.clusterSharding.IsManagedCluster(&appv1.Cluster{Server: secondary}),
+		"precondition: a single-replica shard manages every cluster")
+	assert.True(t, c.ownedAppReferencesCluster(&appv1.Cluster{Server: secondary}),
+		"a secondary destination of an owned application must be reachable")
+
+	// And a cluster no owned application names is still not pulled in.
+	assert.False(t, c.ownedAppReferencesCluster(&appv1.Cluster{Server: "https://never-referenced"}))
+}
+
+// The escape hatch must not open a cluster just because *some* application references it; the
+// referencing application's primary destination has to be owned by this shard.
+func TestCanHandleCluster_UnreferencedClusterStillRefused(t *testing.T) {
+	t.Parallel()
+
+	const secondary = "https://secondary-cluster"
+	const unrelated = "https://unrelated-cluster"
+
+	db := &dbmocks.ArgoDB{}
+	db.EXPECT().GetApplicationControllerReplicas().Return(1).Maybe()
+	db.EXPECT().GetCluster(mock.Anything, mock.Anything).Return(&appv1.Cluster{Server: secondary}, nil).Maybe()
+
+	// An application with no additional destinations cannot pull any cluster in.
+	c := liveStateCache{
+		db:              db,
+		appInformer:     newStubAppInformer(appWithDestinations("single", "https://owned-cluster")),
+		clusterSharding: sharding.NewClusterSharding(db, 0, 2, common.DefaultShardingAlgorithm),
+	}
+
+	assert.False(t, c.ownedAppReferencesCluster(&appv1.Cluster{Server: unrelated}))
+}
+
+func TestIsClusterHasApps_MatchesNamedDestination(t *testing.T) {
+	t.Parallel()
+
+	const primary = "https://primary-cluster"
+	const secondary = "https://secondary-cluster"
+
+	db := &dbmocks.ArgoDB{}
+	db.EXPECT().GetApplicationControllerReplicas().Return(1).Maybe()
+	db.EXPECT().GetCluster(mock.Anything, primary).Return(&appv1.Cluster{Server: primary}, nil).Maybe()
+	db.EXPECT().GetCluster(mock.Anything, secondary).Return(&appv1.Cluster{Server: secondary}, nil).Maybe()
+
+	c := liveStateCache{db: db}
+	app := appWithDestinations("multi", primary, appv1.NamedDestination{
+		Name: "second", Server: secondary, Namespace: "other",
+	})
+	apps := []any{app}
+
+	// Warm-up must trigger for a cluster reached only through a named destination.
+	assert.True(t, c.isClusterHasApps(apps, &appv1.Cluster{Server: secondary}))
+	assert.True(t, c.isClusterHasApps(apps, &appv1.Cluster{Server: primary}))
+	assert.False(t, c.isClusterHasApps(apps, &appv1.Cluster{Server: "https://nobody"}))
 }

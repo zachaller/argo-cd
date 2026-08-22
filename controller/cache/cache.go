@@ -742,19 +742,24 @@ func (c *liveStateCache) GetVersionsInfo(server *appv1.Cluster) (string, []kube.
 	return clusterInfo.GetServerVersion(), clusterInfo.GetAPIResources(), nil
 }
 
+// isClusterHasApps reports whether any of the given applications deploys to the cluster through any
+// of its destinations. An application that reaches a cluster only through one of its additional
+// named destinations still needs that cluster's cache warmed.
 func (c *liveStateCache) isClusterHasApps(apps []any, cluster *appv1.Cluster) bool {
 	for _, obj := range apps {
 		app, ok := obj.(*appv1.Application)
 		if !ok {
 			continue
 		}
-		destCluster, err := argo.GetDestinationCluster(context.Background(), app.Spec.Destination, c.db)
-		if err != nil {
-			log.Warnf("Failed to get destination cluster: %v", err)
-			continue
-		}
-		if destCluster.Server == cluster.Server {
-			return true
+		for _, dest := range app.Spec.AllDestinations() {
+			destCluster, err := argo.GetDestinationCluster(context.Background(), dest.ToApplicationDestination(), c.db)
+			if err != nil {
+				log.Warnf("Failed to get destination cluster: %v", err)
+				continue
+			}
+			if destCluster.Server == cluster.Server {
+				return true
+			}
 		}
 	}
 	return false
@@ -816,7 +821,43 @@ func (c *liveStateCache) Run(ctx context.Context) error {
 }
 
 func (c *liveStateCache) canHandleCluster(cluster *appv1.Cluster) bool {
-	return c.clusterSharding.IsManagedCluster(cluster)
+	return c.clusterSharding.IsManagedCluster(cluster) || c.ownedAppReferencesCluster(cluster)
+}
+
+// ownedAppReferencesCluster reports whether an application this shard owns deploys to the given
+// cluster through one of its additional named destinations.
+//
+// Shard ownership is decided by an application's primary spec.destination alone, so an application
+// whose destinations span clusters is still owned by exactly one shard. That shard must nonetheless
+// be able to read the live state of the other clusters it deploys to, which is what this permits.
+//
+// The cost is that a cluster used as a secondary destination by applications owned by several shards
+// is watched by each of them, multiplying informer memory and API-server load for that cluster.
+// Aligning such applications on a common primary destination keeps that bounded.
+func (c *liveStateCache) ownedAppReferencesCluster(cluster *appv1.Cluster) bool {
+	if c.appInformer == nil || c.clusterSharding == nil {
+		return false
+	}
+	for _, obj := range c.appInformer.GetStore().List() {
+		app, ok := obj.(*appv1.Application)
+		if !ok || !app.Spec.HasMultipleDestinations() {
+			continue
+		}
+		primary, err := argo.GetDestinationCluster(context.Background(), app.Spec.Destination, c.db)
+		if err != nil || !c.clusterSharding.IsManagedCluster(primary) {
+			continue
+		}
+		for _, named := range app.Spec.Destinations {
+			destCluster, err := argo.GetDestinationCluster(context.Background(), named.ToApplicationDestination(), c.db)
+			if err != nil {
+				continue
+			}
+			if destCluster.Server == cluster.Server {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (c *liveStateCache) handleAddEvent(cluster *appv1.Cluster) {
