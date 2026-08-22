@@ -101,6 +101,19 @@ The check is off by default and, when on, applies only to the names in `spec.des
 primary `spec.destination` is unaffected. See
 [the `destinations` resource](../operator-manual/rbac.md#the-destinations-resource).
 
+## Limitation: addressing a resource that exists in two destinations
+
+Argo CD identifies a live resource by its group, kind, namespace and name. An Application whose
+destinations hold the same four values in more than one cluster cannot say which one it means, so
+operations that act on an individual live resource -- viewing or patching its manifest, deleting it,
+running a resource action, reading its events -- are rejected as ambiguous.
+
+Everything that treats the Application as a whole is unaffected: sync, diff, health, the resource tree
+and pod logs all handle such resources normally, each against its own cluster.
+
+Give the resources distinct namespaces, or split them across Applications, if you need to address them
+individually.
+
 ## Limitation: manifests are generated once
 
 Manifests are generated a single time, against the cluster named by `spec.destination`. Helm's

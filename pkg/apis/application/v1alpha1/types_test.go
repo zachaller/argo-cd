@@ -6329,3 +6329,117 @@ func TestApplicationSpec_BuildComparedToStatus_CarriesDestinations(t *testing.T)
 	assert.Equal(t, spec.Destinations, ct.Destinations)
 	assert.Equal(t, spec.Destination, ct.Destination)
 }
+
+func TestResourceNodeFullNameIncludesDestination(t *testing.T) {
+	t.Parallel()
+
+	node := ResourceNode{ResourceRef: ResourceRef{
+		Group: "apps", Kind: "Deployment", Namespace: "ns", Name: "web",
+	}}
+
+	// An application that declares no named destinations produces exactly the string it always has.
+	assert.Equal(t, "apps/Deployment/ns/web", node.FullName())
+
+	node.Destination = "prod"
+	assert.Equal(t, "prod/apps/Deployment/ns/web", node.FullName())
+
+	diff := ResourceDiff{Group: "apps", Kind: "Deployment", Namespace: "ns", Name: "web"}
+	assert.Equal(t, "apps/Deployment/ns/web", diff.FullName())
+	diff.Destination = "prod"
+	assert.Equal(t, "prod/apps/Deployment/ns/web", diff.FullName())
+}
+
+func TestApplicationTreeFindNode(t *testing.T) {
+	t.Parallel()
+
+	node := func(destination, name string) ResourceNode {
+		return ResourceNode{ResourceRef: ResourceRef{
+			Group: "apps", Kind: "Deployment", Namespace: "ns", Name: name,
+			UID: destination + "-" + name, Destination: destination,
+		}}
+	}
+
+	t.Run("a single match is returned with its destination", func(t *testing.T) {
+		t.Parallel()
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("prod", "web"), node("", "api")}}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web")
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, "prod", found.Destination, "the caller routes to this cluster")
+	})
+
+	t.Run("orphaned nodes are searched too", func(t *testing.T) {
+		t.Parallel()
+		tree := &ApplicationTree{OrphanedNodes: []ResourceNode{node("prod", "web")}}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web")
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, "prod", found.Destination)
+	})
+
+	t.Run("no match is not an error", func(t *testing.T) {
+		t.Parallel()
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("prod", "web")}}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "absent")
+		require.NoError(t, err)
+		assert.Nil(t, found)
+	})
+
+	t.Run("the same resource in two destinations is ambiguous", func(t *testing.T) {
+		t.Parallel()
+		// The request names a group, kind, namespace and name and nothing else, so resolving to
+		// either node would act against a cluster the caller did not choose.
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("prod", "web"), node("staging", "web")}}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web")
+		require.Error(t, err)
+		assert.Nil(t, found)
+		assert.Contains(t, err.Error(), "prod")
+		assert.Contains(t, err.Error(), "staging")
+	})
+
+	t.Run("the primary destination is named by its field in the error", func(t *testing.T) {
+		t.Parallel()
+		// It has no name of its own, so reporting an empty one would tell the user nothing.
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("", "web"), node("prod", "web")}}
+
+		_, err := tree.FindNode("apps", "Deployment", "ns", "web")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "spec.destination")
+	})
+
+	t.Run("duplicates within one destination are not ambiguous", func(t *testing.T) {
+		t.Parallel()
+		// The same node reachable twice says nothing about which cluster is meant.
+		tree := &ApplicationTree{
+			Nodes:         []ResourceNode{node("prod", "web")},
+			OrphanedNodes: []ResourceNode{node("prod", "web")},
+		}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web")
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, "prod", found.Destination)
+	})
+}
+
+func TestApplicationTreeNormalizeSortsByDestination(t *testing.T) {
+	t.Parallel()
+
+	node := func(destination string) ResourceNode {
+		return ResourceNode{ResourceRef: ResourceRef{
+			Group: "apps", Kind: "Deployment", Namespace: "ns", Name: "web", Destination: destination,
+		}}
+	}
+
+	// Without the destination in the sort key these compare equal, so their order after a merge
+	// depends on the input order and the cached tree churns for no reason.
+	tree := &ApplicationTree{Nodes: []ResourceNode{node("staging"), node("prod")}}
+	tree.Normalize()
+
+	assert.Equal(t, []string{"prod", "staging"},
+		[]string{tree.Nodes[0].Destination, tree.Nodes[1].Destination})
+}

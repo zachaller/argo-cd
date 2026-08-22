@@ -340,10 +340,9 @@ terminating a running operation, and the resource-level operations (`get`, `patc
 actions on an individual live resource).
 
 > [!NOTE]
-> Resource-level operations are checked against **every** named destination of the Application, not only the
-> destination the individual resource lives in. This is deliberate: the resource lookup is not yet
-> destination-aware, so a resource with the same group, kind, namespace and name in two clusters could
-> otherwise be authorized against the wrong one.
+> A resource-level operation is checked against the destination the resource actually lives in. If the same
+> group, kind, namespace and name exists in more than one of the Application's destinations, the request is
+> rejected as ambiguous rather than resolved to one of them, because it does not say which cluster it means.
 
 > [!WARNING]
 > Opening a terminal into a pod (the `exec` resource) is **not** destination-checked. That path resolves its

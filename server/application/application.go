@@ -331,6 +331,24 @@ func (s *Server) enforceDestinations(ctx context.Context, project string, dests 
 	return nil
 }
 
+// destinationsNamed returns the Application's named destination called name, in the form
+// enforceDestinations takes. The primary destination has no name and is not part of the destinations
+// authorization axis, so it yields nothing to check.
+func destinationsNamed(a *v1alpha1.Application, name string) []v1alpha1.NamedDestination {
+	if name == argo.PrimaryDestinationName {
+		return nil
+	}
+	for _, d := range a.Spec.Destinations {
+		if d.Name == name {
+			return []v1alpha1.NamedDestination{d}
+		}
+	}
+	// The resource claims a destination the spec no longer declares -- a tree read before the
+	// Application was edited. Fall back to requiring the whole set rather than nothing: a stale
+	// tree must not become a way to skip the check.
+	return a.Spec.Destinations
+}
+
 // List returns list of applications
 func (s *Server) List(ctx context.Context, q *application.ApplicationQuery) (*v1alpha1.ApplicationList, error) {
 	selector, err := labels.Parse(q.GetSelector())
@@ -560,7 +578,7 @@ func (s *Server) GetManifests(ctx context.Context, q *application.ApplicationMan
 			return fmt.Errorf("error getting app instance label key from settings: %w", err)
 		}
 
-		config, err := s.getApplicationClusterConfig(ctx, a, proj)
+		config, err := s.getApplicationClusterConfig(ctx, a, proj, argo.PrimaryDestinationName)
 		if err != nil {
 			return fmt.Errorf("error getting application cluster config: %w", err)
 		}
@@ -729,7 +747,7 @@ func (s *Server) GetManifestsWithFiles(stream application.ApplicationService_Get
 			return fmt.Errorf("error getting trackingMethod from settings: %w", err)
 		}
 
-		config, err := s.getApplicationClusterConfig(ctx, a, proj)
+		config, err := s.getApplicationClusterConfig(ctx, a, proj, argo.PrimaryDestinationName)
 		if err != nil {
 			return fmt.Errorf("error getting application cluster config: %w", err)
 		}
@@ -974,9 +992,13 @@ func (s *Server) ListResourceEvents(ctx context.Context, q *application.Applicat
 			return nil, fmt.Errorf("error getting app resources: %w", err)
 		}
 		found := false
+		// The destination the resource lives in, so its events are read from that cluster rather
+		// than from the primary one. The UID makes the match exact, so there is no ambiguity here.
+		destName := argo.PrimaryDestinationName
 		for _, n := range append(tree.Nodes, tree.OrphanedNodes...) {
 			if n.UID == q.GetResourceUID() && n.Name == q.GetResourceName() && n.Namespace == q.GetResourceNamespace() {
 				found = true
+				destName = n.Destination
 				break
 			}
 		}
@@ -986,7 +1008,7 @@ func (s *Server) ListResourceEvents(ctx context.Context, q *application.Applicat
 
 		namespace = q.GetResourceNamespace()
 		var config *rest.Config
-		config, err = s.getApplicationClusterConfig(ctx, a, p)
+		config, err = s.getApplicationClusterConfig(ctx, a, p, destName)
 		if err != nil {
 			return nil, fmt.Errorf("error getting application cluster config: %w", err)
 		}
@@ -1465,8 +1487,16 @@ func (s *Server) validateAndNormalizeApp(ctx context.Context, app *v1alpha1.Appl
 	return nil
 }
 
-func (s *Server) getApplicationClusterConfig(ctx context.Context, a *v1alpha1.Application, p *v1alpha1.AppProject) (*rest.Config, error) {
-	cluster, err := argo.GetDestinationCluster(ctx, a.Spec.Destination, s.db)
+// getApplicationClusterConfig returns a REST config for one of the Application's destinations.
+// destName is the name of a destination in spec.destinations, or argo.PrimaryDestinationName for
+// spec.destination. A resource lives in exactly one destination's cluster, so a caller acting on a
+// live resource must pass that resource's destination rather than defaulting to the primary.
+func (s *Server) getApplicationClusterConfig(ctx context.Context, a *v1alpha1.Application, p *v1alpha1.AppProject, destName string) (*rest.Config, error) {
+	destination, err := a.Spec.GetDestination(destName)
+	if err != nil {
+		return nil, fmt.Errorf("error resolving destination: %w", err)
+	}
+	cluster, err := argo.GetDestinationCluster(ctx, destination, s.db)
 	if err != nil {
 		return nil, fmt.Errorf("error validating destination: %w", err)
 	}
@@ -1484,7 +1514,7 @@ func (s *Server) getApplicationClusterConfig(ctx context.Context, a *v1alpha1.Ap
 		return config, nil
 	}
 
-	serviceAccountToImpersonate, err := settings.DeriveServiceAccountToImpersonate(p, a, cluster, a.Spec.Destination.Namespace)
+	serviceAccountToImpersonate, err := settings.DeriveServiceAccountToImpersonate(p, a, cluster, destination.Namespace)
 	if err != nil {
 		return nil, fmt.Errorf("error deriving service account to impersonate: %w", err)
 	}
@@ -1576,25 +1606,27 @@ func (s *Server) getAppLiveResource(ctx context.Context, action string, q *appli
 		return nil, nil, nil, err
 	}
 
-	// Every named destination, not just the one this resource lives in. ApplicationTree.FindNode
-	// below is not destination aware yet, so the same group/kind/namespace/name in two clusters
-	// resolves to whichever node comes first; deciding access from that node's destination could
-	// decide it against the wrong cluster. Requiring the whole set is the fail-closed reading, and
-	// can be narrowed once the tree carries destinations through lookup.
-	if err := s.enforceDestinations(ctx, a.Spec.GetProject(), a.Spec.Destinations, destinationAction); err != nil {
-		return nil, nil, nil, err
-	}
-
 	tree, err := s.getAppResources(ctx, a)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("error getting app resources: %w", err)
 	}
 
-	found := tree.FindNode(q.GetGroup(), q.GetKind(), q.GetNamespace(), q.GetResourceName())
+	found, err := tree.FindNode(q.GetGroup(), q.GetKind(), q.GetNamespace(), q.GetResourceName())
+	if err != nil {
+		return nil, nil, nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	if found == nil || found.UID == "" {
 		return nil, nil, nil, status.Errorf(codes.InvalidArgument, "%s %s %s not found as part of application %s", q.GetKind(), q.GetGroup(), q.GetResourceName(), q.GetName())
 	}
-	config, err := s.getApplicationClusterConfig(ctx, a, p)
+
+	// The resource's own destination, now that the lookup has established which one it is
+	// unambiguously. Authorizing against the whole set would deny an operation the user is
+	// permitted on the cluster the resource actually lives in.
+	if err := s.enforceDestinations(ctx, a.Spec.GetProject(), destinationsNamed(a, found.Destination), destinationAction); err != nil {
+		return nil, nil, nil, err
+	}
+
+	config, err := s.getApplicationClusterConfig(ctx, a, p, found.Destination)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("error getting application cluster config: %w", err)
 	}
@@ -1985,14 +2017,25 @@ func (s *Server) PodLogs(q *application.ApplicationPodLogsQuery, ws application.
 		return fmt.Errorf("error getting app resource tree: %w", err)
 	}
 
-	config, err := s.getApplicationClusterConfig(ws.Context(), a, p)
-	if err != nil {
-		return fmt.Errorf("error getting application cluster config: %w", err)
-	}
-
-	kubeClientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("error creating kube client: %w", err)
+	// One client per destination rather than one for the application: the selected pods may live in
+	// different clusters, and reading them all through the primary destination's client would look
+	// for them in the wrong place. Built on demand so a single-destination application makes exactly
+	// one client, as before.
+	clientsByDestination := map[string]kubernetes.Interface{}
+	clientForDestination := func(destName string) (kubernetes.Interface, error) {
+		if client, ok := clientsByDestination[destName]; ok {
+			return client, nil
+		}
+		config, err := s.getApplicationClusterConfig(ws.Context(), a, p, destName)
+		if err != nil {
+			return nil, fmt.Errorf("error getting application cluster config: %w", err)
+		}
+		client, err := kubernetes.NewForConfig(config)
+		if err != nil {
+			return nil, fmt.Errorf("error creating kube client: %w", err)
+		}
+		clientsByDestination[destName] = client
+		return client, nil
 	}
 
 	// from the tree find pods which match query of kind, group, and resource name
@@ -2013,6 +2056,10 @@ func (s *Server) PodLogs(q *application.ApplicationPodLogsQuery, ws application.
 	var streams []chan logEntry
 
 	for _, pod := range pods {
+		kubeClientset, err := clientForDestination(pod.Destination)
+		if err != nil {
+			return err
+		}
 		stream, err := kubeClientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
 			Container:    q.GetContainer(),
 			Follow:       q.GetFollow(),
@@ -2698,7 +2745,7 @@ func (s *Server) getUnstructuredLiveResourceOrApp(ctx context.Context, rbacReque
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
-		config, err = s.getApplicationClusterConfig(ctx, app, p)
+		config, err = s.getApplicationClusterConfig(ctx, app, p, argo.PrimaryDestinationName)
 		if err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("error getting application cluster config: %w", err)
 		}

@@ -2209,13 +2209,39 @@ type ApplicationSummary struct {
 // It looks for a node that matches the given group, kind, namespace, and name.
 // The search includes both directly managed nodes (`Nodes`) and orphaned nodes (`OrphanedNodes`).
 // Returns a pointer to the found node, or nil if no matching node is found.
-func (t *ApplicationTree) FindNode(group string, kind string, namespace string, name string) *ResourceNode {
+//
+// An Application that deploys to several destinations may legitimately hold the same group, kind,
+// namespace and name in more than one cluster, while a request identifies a resource without saying
+// which cluster it means. Returning whichever node came first would read or write against the wrong
+// cluster, so an ambiguous lookup is an error naming the destinations it matched.
+func (t *ApplicationTree) FindNode(group string, kind string, namespace string, name string) (*ResourceNode, error) {
+	var found *ResourceNode
+	var destinations []string
+	seen := map[string]bool{}
 	for _, n := range append(t.Nodes, t.OrphanedNodes...) {
-		if n.Group == group && n.Kind == kind && n.Namespace == namespace && n.Name == name {
-			return &n
+		if n.Group != group || n.Kind != kind || n.Namespace != namespace || n.Name != name {
+			continue
+		}
+		if found == nil {
+			found = &n
+		}
+		if !seen[n.Destination] {
+			seen[n.Destination] = true
+			destinations = append(destinations, n.Destination)
 		}
 	}
-	return nil
+	if len(destinations) > 1 {
+		for i, d := range destinations {
+			if d == "" {
+				// The primary destination has no name; naming the field is what a user can act on.
+				destinations[i] = "spec.destination"
+			}
+		}
+		sort.Strings(destinations)
+		return nil, fmt.Errorf("%s/%s %s/%s exists in more than one destination of this application (%s); it cannot be addressed without naming one",
+			group, kind, namespace, name, strings.Join(destinations, ", "))
+	}
+	return found, nil
 }
 
 // GetSummary generates a summary of the application by extracting external URLs and container images
@@ -2309,8 +2335,16 @@ type ResourceNode struct {
 
 // FullName returns a resource node's full name in the format "group/kind/namespace/name"
 // For cluster-scoped resources, namespace will be the empty string.
+// FullName returns a stable identity for the node. It includes the destination when the node belongs
+// to one of an Application's named destinations: without it two clusters' identically named
+// resources are indistinguishable, so a merged tree cannot be sorted deterministically and a lookup
+// cannot tell them apart. The primary destination has no name, so an Application that declares none
+// produces exactly the string it always has.
 func (n *ResourceNode) FullName() string {
-	return fmt.Sprintf("%s/%s/%s/%s", n.Group, n.Kind, n.Namespace, n.Name)
+	if n.Destination == "" {
+		return fmt.Sprintf("%s/%s/%s/%s", n.Group, n.Kind, n.Namespace, n.Name)
+	}
+	return fmt.Sprintf("%s/%s/%s/%s/%s", n.Destination, n.Group, n.Kind, n.Namespace, n.Name)
 }
 
 // GroupKindVersion returns the GVK schema type for given resource node
@@ -2395,8 +2429,13 @@ type ResourceDiff struct {
 
 // FullName returns full name of a node that was used for diffing in the format "group/kind/namespace/name"
 // For cluster-scoped resources, namespace will be the empty string.
+// FullName returns a stable identity for the diff, including the destination when the resource
+// belongs to one of an Application's named destinations. See ResourceNode.FullName.
 func (r *ResourceDiff) FullName() string {
-	return fmt.Sprintf("%s/%s/%s/%s", r.Group, r.Kind, r.Namespace, r.Name)
+	if r.Destination == "" {
+		return fmt.Sprintf("%s/%s/%s/%s", r.Group, r.Kind, r.Namespace, r.Name)
+	}
+	return fmt.Sprintf("%s/%s/%s/%s/%s", r.Destination, r.Group, r.Kind, r.Namespace, r.Name)
 }
 
 // ConnectionStatus represents the status indicator for a connection to a remote resource
