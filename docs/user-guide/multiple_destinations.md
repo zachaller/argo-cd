@@ -44,6 +44,27 @@ No two destinations may resolve to the same cluster **and** namespace. Overlappi
 share one cluster cache, so the same live object would be claimed by both, producing a repeated apply
 and an oscillating diff. Such a spec is rejected.
 
+## Declaring destinations from the CLI
+
+`argocd app create` and `argocd app set` take a repeatable `--dest` flag of comma separated
+`key=value` pairs. The recognised keys are `name`, `server`, `namespace` and `clusterName`:
+
+```bash
+argocd app set my-app \
+  --dest name=prod,server=https://prod.example.com,namespace=web \
+  --dest name=shared,clusterName=minikube,namespace=infra
+```
+
+`name` is required — it is what a manifest's annotation selects. Give either `server` or
+`clusterName`, not both, exactly as for `spec.destination`.
+
+Each `argocd app set --dest` call replaces the whole list, so passing every destination you want to
+keep is how one is removed as well as added. `--dest` never touches the primary `spec.destination`,
+which keeps its own `--dest-server`, `--dest-name` and `--dest-namespace` flags.
+
+`argocd app get` lists the named destinations and, for an Application that declares any, adds a
+`DESTINATION` column to its resources. The primary destination shows as `(primary)`.
+
 ## Routing a manifest
 
 Annotate a manifest with the name of the destination it belongs to:

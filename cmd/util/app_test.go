@@ -646,3 +646,81 @@ func TestFilterResources(t *testing.T) {
 		assert.Nil(t, filteredResources)
 	})
 }
+
+func TestParseNamedDestination(t *testing.T) {
+	t.Parallel()
+
+	t.Run("all fields", func(t *testing.T) {
+		t.Parallel()
+
+		destination, err := parseNamedDestination("name=prod,server=https://prod.example.com,namespace=web")
+		require.NoError(t, err)
+		assert.Equal(t, v1alpha1.NamedDestination{
+			Name:      "prod",
+			Server:    "https://prod.example.com",
+			Namespace: "web",
+		}, destination)
+	})
+
+	t.Run("cluster by symbolic name", func(t *testing.T) {
+		t.Parallel()
+
+		destination, err := parseNamedDestination("name=shared,clusterName=minikube,namespace=infra")
+		require.NoError(t, err)
+		assert.Equal(t, v1alpha1.NamedDestination{
+			Name:        "shared",
+			ClusterName: "minikube",
+			Namespace:   "infra",
+		}, destination)
+	})
+
+	t.Run("a name is required", func(t *testing.T) {
+		t.Parallel()
+
+		// Manifests select a destination by name, so one without a name can never be targeted.
+		_, err := parseNamedDestination("server=https://prod.example.com,namespace=web")
+		require.ErrorContains(t, err, "no name")
+	})
+
+	t.Run("server and clusterName are mutually exclusive", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := parseNamedDestination("name=prod,server=https://prod.example.com,clusterName=minikube")
+		require.ErrorContains(t, err, "both server and clusterName")
+	})
+
+	t.Run("an unknown field is an error", func(t *testing.T) {
+		t.Parallel()
+
+		// Ignoring it would silently produce a destination pointing somewhere other than intended.
+		_, err := parseNamedDestination("name=prod,namesapce=web")
+		require.ErrorContains(t, err, "unknown field")
+	})
+
+	t.Run("a bare value is an error", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := parseNamedDestination("prod")
+		require.ErrorContains(t, err, "key=value")
+	})
+}
+
+func Test_setAppSpecOptionsDestinations(t *testing.T) {
+	f := newAppOptionsFixture()
+
+	require.NoError(t, f.SetFlag("dest", "name=prod,server=https://prod.example.com,namespace=web"))
+	require.Len(t, f.spec.Destinations, 1)
+	assert.Equal(t, "prod", f.spec.Destinations[0].Name)
+	assert.Equal(t, "https://prod.example.com", f.spec.Destinations[0].Server)
+	assert.Equal(t, "web", f.spec.Destinations[0].Namespace)
+
+	// The flag is repeatable, and the whole list is replaced rather than appended to, so that
+	// setting it is how a destination is removed as well as added.
+	require.NoError(t, f.SetFlag("dest", "name=shared,server=https://shared.example.com,namespace=infra"))
+	require.Len(t, f.spec.Destinations, 2)
+	assert.Equal(t, []string{"prod", "shared"},
+		[]string{f.spec.Destinations[0].Name, f.spec.Destinations[1].Name})
+
+	// The primary destination is untouched by --dest.
+	assert.Empty(t, f.spec.Destination.Server)
+}

@@ -655,6 +655,18 @@ func printAppSummaryTable(app *argoappv1.Application, appURL string, windows *ar
 	fmt.Printf(printOpFmtStr, "Server:", getServer(app))
 	fmt.Printf(printOpFmtStr, "Namespace:", app.Spec.Destination.Namespace)
 	fmt.Printf(printOpFmtStr, "URL:", appURL)
+	if app.Spec.HasMultipleDestinations() {
+		fmt.Println("Destinations:")
+		for _, destination := range app.Spec.Destinations {
+			cluster := destination.Server
+			if cluster == "" {
+				cluster = destination.ClusterName
+			}
+			fmt.Printf("- Name: %s\n", destination.Name)
+			fmt.Printf("  Cluster: %s\n", cluster)
+			fmt.Printf("  Namespace: %s\n", destination.Namespace)
+		}
+	}
 	if !app.Spec.HasMultipleSources() {
 		fmt.Println("Source:")
 	} else {
@@ -1672,10 +1684,28 @@ func NewApplicationWaitCommand(clientOpts *argocdclient.ClientOptions) *cobra.Co
 
 // printAppResources prints the resources of an application in a tabwriter table
 func printAppResources(w io.Writer, app *argoappv1.Application) {
-	_, _ = fmt.Fprint(w, "GROUP\tKIND\tNAMESPACE\tNAME\tSTATUS\tHEALTH\tHOOK\tMESSAGE\n")
-	for _, res := range getResourceStates(app, nil) {
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", res.Group, res.Kind, res.Namespace, res.Name, res.Status, res.Health, res.Hook, res.Message)
+	// The destination column appears only for an application that declares named destinations, so
+	// the output of every other application is unchanged.
+	if !app.Spec.HasMultipleDestinations() {
+		_, _ = fmt.Fprint(w, "GROUP\tKIND\tNAMESPACE\tNAME\tSTATUS\tHEALTH\tHOOK\tMESSAGE\n")
+		for _, res := range getResourceStates(app, nil) {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", res.Group, res.Kind, res.Namespace, res.Name, res.Status, res.Health, res.Hook, res.Message)
+		}
+		return
 	}
+	_, _ = fmt.Fprint(w, "DESTINATION\tGROUP\tKIND\tNAMESPACE\tNAME\tSTATUS\tHEALTH\tHOOK\tMESSAGE\n")
+	for _, res := range getResourceStates(app, nil) {
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", destinationDisplayName(res.Destination), res.Group, res.Kind, res.Namespace, res.Name, res.Status, res.Health, res.Hook, res.Message)
+	}
+}
+
+// destinationDisplayName renders a destination for a human. The primary destination has no name of
+// its own, so it is shown by the field that defines it rather than as a blank column.
+func destinationDisplayName(destination string) string {
+	if destination == "" {
+		return "(primary)"
+	}
+	return destination
 }
 
 func printTreeView(nodeMapping map[string]argoappv1.ResourceNode, parentChildMapping map[string][]string, parentNodes map[string]struct{}, mapNodeNameToResourceState map[string]*resourceState) {
@@ -2110,20 +2140,38 @@ func getAppNamesBySelector(ctx context.Context, appIf application.ApplicationSer
 }
 
 // ResourceState tracks the state of a resource when waiting on an application status.
-type resourceState struct {
-	Group     string
-	Kind      string
-	Namespace string
-	Name      string
-	Status    string
-	Health    string
-	Hook      string
-	Message   string
+// resourceKeyInDestination identifies a resource within an application: its group, kind, namespace
+// and name, plus the destination it lives in. The empty destination is the primary spec.destination.
+type resourceKeyInDestination struct {
+	key         kube.ResourceKey
+	destination string
 }
 
-// Key returns a unique-ish key for the resource.
+func (k resourceKeyInDestination) sortKey() string {
+	return k.destination + "/" + k.key.String()
+}
+
+type resourceState struct {
+	Group       string
+	Kind        string
+	Namespace   string
+	Name        string
+	Status      string
+	Health      string
+	Hook        string
+	Message     string
+	Destination string
+}
+
+// Key returns a unique-ish key for the resource. It includes the destination, because an
+// application that deploys to several destinations may hold the same group, kind, namespace and
+// name in more than one cluster. The primary destination has no name, so an application that
+// declares none produces exactly the key it always has.
 func (rs *resourceState) Key() string {
-	return fmt.Sprintf("%s/%s/%s/%s", rs.Group, rs.Kind, rs.Namespace, rs.Name)
+	if rs.Destination == "" {
+		return fmt.Sprintf("%s/%s/%s/%s", rs.Group, rs.Kind, rs.Namespace, rs.Name)
+	}
+	return fmt.Sprintf("%s/%s/%s/%s/%s", rs.Destination, rs.Group, rs.Kind, rs.Namespace, rs.Name)
 }
 
 func (rs *resourceState) FormatItems() []any {
@@ -2151,10 +2199,16 @@ func (rs *resourceState) Merge(newState *resourceState) bool {
 
 func getResourceStates(app *argoappv1.Application, selectedResources []*argoappv1.SyncOperationResource) []*resourceState {
 	var states []*resourceState
-	resourceByKey := make(map[kube.ResourceKey]argoappv1.ResourceStatus)
+	// Keyed by destination as well as identity: the same group, kind, namespace and name may exist
+	// in two of an application's destinations, and matching a sync result to the wrong one would
+	// report the wrong resource's health and status.
+	resourceByKey := make(map[resourceKeyInDestination]argoappv1.ResourceStatus)
 	for i := range app.Status.Resources {
 		res := app.Status.Resources[i]
-		resourceByKey[kube.NewResourceKey(res.Group, res.Kind, res.Namespace, res.Name)] = res
+		resourceByKey[resourceKeyInDestination{
+			key:         kube.NewResourceKey(res.Group, res.Kind, res.Namespace, res.Name),
+			destination: res.Destination,
+		}] = res
 	}
 
 	// print most resources info along with most recent operation results
@@ -2162,7 +2216,10 @@ func getResourceStates(app *argoappv1.Application, selectedResources []*argoappv
 		for _, res := range app.Status.OperationState.SyncResult.Resources {
 			sync := string(res.HookPhase)
 			health := string(res.Status)
-			key := kube.NewResourceKey(res.Group, res.Kind, res.Namespace, res.Name)
+			key := resourceKeyInDestination{
+				key:         kube.NewResourceKey(res.Group, res.Kind, res.Namespace, res.Name),
+				destination: res.Destination,
+			}
 			if resource, ok := resourceByKey[key]; ok && res.HookType == "" {
 				health = ""
 				if resource.Health != nil {
@@ -2171,17 +2228,17 @@ func getResourceStates(app *argoappv1.Application, selectedResources []*argoappv
 				sync = string(resource.Status)
 			}
 			states = append(states, &resourceState{
-				Group: res.Group, Kind: res.Kind, Namespace: res.Namespace, Name: res.Name, Status: sync, Health: health, Hook: string(res.HookType), Message: res.Message,
+				Group: res.Group, Kind: res.Kind, Namespace: res.Namespace, Name: res.Name, Status: sync, Health: health, Hook: string(res.HookType), Message: res.Message, Destination: res.Destination,
 			})
-			delete(resourceByKey, kube.NewResourceKey(res.Group, res.Kind, res.Namespace, res.Name))
+			delete(resourceByKey, key)
 		}
 	}
-	resKeys := make([]kube.ResourceKey, 0)
+	resKeys := make([]resourceKeyInDestination, 0)
 	for k := range resourceByKey {
 		resKeys = append(resKeys, k)
 	}
 	sort.Slice(resKeys, func(i, j int) bool {
-		return resKeys[i].String() < resKeys[j].String()
+		return resKeys[i].sortKey() < resKeys[j].sortKey()
 	})
 	// print rest of resources which were not part of most recent operation
 	for _, resKey := range resKeys {
@@ -2191,7 +2248,7 @@ func getResourceStates(app *argoappv1.Application, selectedResources []*argoappv
 			health = string(res.Health.Status)
 		}
 		states = append(states, &resourceState{
-			Group: res.Group, Kind: res.Kind, Namespace: res.Namespace, Name: res.Name, Status: string(res.Status), Health: health, Hook: "", Message: "",
+			Group: res.Group, Kind: res.Kind, Namespace: res.Namespace, Name: res.Name, Status: string(res.Status), Health: health, Hook: "", Message: "", Destination: res.Destination,
 		})
 	}
 	// filter out not selected resources

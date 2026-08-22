@@ -39,6 +39,7 @@ type AppOptions struct {
 	destName                        string
 	destServer                      string
 	destNamespace                   string
+	destinations                    []string
 	Parameters                      []string
 	valuesFiles                     []string
 	ignoreMissingValueFiles         bool
@@ -120,6 +121,7 @@ func AddAppFlags(command *cobra.Command, opts *AppOptions) {
 	command.Flags().StringVar(&opts.destServer, "dest-server", "", "K8s cluster URL (e.g. https://kubernetes.default.svc)")
 	command.Flags().StringVar(&opts.destName, "dest-name", "", "K8s cluster Name (e.g. minikube)")
 	command.Flags().StringVar(&opts.destNamespace, "dest-namespace", "", "K8s target namespace")
+	command.Flags().StringArrayVar(&opts.destinations, "dest", nil, "Additional named destination the app may deploy to, which manifests select with the argocd.argoproj.io/destination annotation, as comma separated key=value pairs (can be repeated to set several destinations: --dest name=prod,server=https://prod,namespace=web --dest name=shared,clusterName=minikube,namespace=infra)")
 	command.Flags().StringArrayVarP(&opts.Parameters, "parameter", "p", []string{}, "set a parameter override (e.g. -p guestbook=image=example/guestbook:latest)")
 	command.Flags().StringArrayVar(&opts.valuesFiles, "values", []string{}, "Helm values file(s) to use")
 	command.Flags().BoolVar(&opts.ignoreMissingValueFiles, "ignore-missing-value-files", false, "Ignore locally missing valueFiles when setting helm template --values")
@@ -178,6 +180,43 @@ func AddAppFlags(command *cobra.Command, opts *AppOptions) {
 	command.Flags().StringVar(&opts.SourceName, "source-name", "", "Name of the source from the list of sources of the app.")
 }
 
+// parseNamedDestination parses one --dest value: comma separated key=value pairs naming an
+// additional destination, for example "name=prod,server=https://prod,namespace=web".
+//
+// The recognised keys mirror the fields of spec.destinations[]: name, server, namespace and
+// clusterName. An unrecognised key is an error rather than being ignored, because a typo would
+// otherwise silently produce a destination pointing somewhere other than intended.
+func parseNamedDestination(value string) (argoappv1.NamedDestination, error) {
+	destination := argoappv1.NamedDestination{}
+	for field := range strings.SplitSeq(value, ",") {
+		key, val, found := strings.Cut(field, "=")
+		if !found {
+			return destination, fmt.Errorf("expected key=value pairs separated by commas, got %q", field)
+		}
+		switch strings.TrimSpace(key) {
+		case "name":
+			destination.Name = val
+		case "server":
+			destination.Server = val
+		case "namespace":
+			destination.Namespace = val
+		case "clusterName":
+			destination.ClusterName = val
+		default:
+			return destination, fmt.Errorf("unknown field %q, expected one of name, server, namespace, clusterName", key)
+		}
+	}
+	if destination.Name == "" {
+		return destination, fmt.Errorf("destination %q has no name; manifests select a destination by name", value)
+	}
+	// The same rule spec.destination follows: a cluster is identified by its URL or by its symbolic
+	// name, and giving both leaves it ambiguous which one to resolve.
+	if destination.Server != "" && destination.ClusterName != "" {
+		return destination, fmt.Errorf("destination %q can't have both server and clusterName defined", destination.Name)
+	}
+	return destination, nil
+}
+
 func SetAppSpecOptions(flags *pflag.FlagSet, spec *argoappv1.ApplicationSpec, appOpts *AppOptions, sourcePosition int) int {
 	visited := 0
 	if flags == nil {
@@ -219,6 +258,18 @@ func SetAppSpecOptions(flags *pflag.FlagSet, spec *argoappv1.ApplicationSpec, ap
 			spec.Destination.Server = appOpts.destServer
 		case "dest-namespace":
 			spec.Destination.Namespace = appOpts.destNamespace
+		case "dest":
+			// The whole list is replaced rather than appended to, so that setting --dest is how a
+			// destination is removed as well as added, matching every other repeatable flag here.
+			destinations := make([]argoappv1.NamedDestination, 0, len(appOpts.destinations))
+			for _, value := range appOpts.destinations {
+				destination, err := parseNamedDestination(value)
+				if err != nil {
+					log.Fatalf("Invalid dest: %v", err)
+				}
+				destinations = append(destinations, destination)
+			}
+			spec.Destinations = destinations
 		case "project":
 			spec.Project = appOpts.project
 		case "sync-policy":
