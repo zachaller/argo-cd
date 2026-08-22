@@ -238,28 +238,6 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 		return
 	}
 
-	destCluster, err := argo.GetDestinationCluster(ctx, app.Spec.Destination, m.db)
-	if err != nil {
-		state.Phase = common.OperationError
-		state.Message = fmt.Sprintf("Failed to get destination cluster: %v", err)
-		return
-	}
-
-	rawConfig, err := destCluster.RawRestConfig()
-	if err != nil {
-		state.Phase = common.OperationError
-		state.Message = err.Error()
-		return
-	}
-
-	clusterRESTConfig, err := destCluster.RESTConfig()
-	if err != nil {
-		state.Phase = common.OperationError
-		state.Message = err.Error()
-		return
-	}
-	restConfig := metrics.AddMetricsTransportWrapper(m.metricsServer, app, clusterRESTConfig)
-
 	resourceOverrides, err := m.settingsMgr.GetResourceOverrides()
 	if err != nil {
 		state.Phase = common.OperationError
@@ -299,6 +277,39 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 		clientSideApplyManager = managerValue
 	}
 
+	installationID, err := m.settingsMgr.GetInstallationID()
+	if err != nil {
+		log.Errorf("Could not get installation ID: %v", err)
+		return
+	}
+	trackingMethod, err := m.settingsMgr.GetTrackingMethod()
+	if err != nil {
+		log.Errorf("Could not get trackingMethod: %v", err)
+		return
+	}
+
+	destCluster, err := argo.GetDestinationCluster(ctx, app.Spec.Destination, m.db)
+	if err != nil {
+		state.Phase = common.OperationError
+		state.Message = fmt.Sprintf("Failed to get destination cluster: %v", err)
+		return
+	}
+
+	rawConfig, err := destCluster.RawRestConfig()
+	if err != nil {
+		state.Phase = common.OperationError
+		state.Message = err.Error()
+		return
+	}
+
+	clusterRESTConfig, err := destCluster.RESTConfig()
+	if err != nil {
+		state.Phase = common.OperationError
+		state.Message = err.Error()
+		return
+	}
+	restConfig := metrics.AddMetricsTransportWrapper(m.metricsServer, app, clusterRESTConfig)
+
 	reconciliationResult := compareResult.reconciliationResult
 
 	// if RespectIgnoreDifferences is enabled, it should normalize the target
@@ -319,17 +330,6 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 			return
 		}
 		reconciliationResult.Target = patchedTargets
-	}
-
-	installationID, err := m.settingsMgr.GetInstallationID()
-	if err != nil {
-		log.Errorf("Could not get installation ID: %v", err)
-		return
-	}
-	trackingMethod, err := m.settingsMgr.GetTrackingMethod()
-	if err != nil {
-		log.Errorf("Could not get trackingMethod: %v", err)
-		return
 	}
 
 	impersonationEnabled, err := m.settingsMgr.IsImpersonationEnabled()
