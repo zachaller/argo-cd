@@ -729,7 +729,6 @@ func (m *appStateManager) CompareAppState(ctx context.Context, app *v1alpha1.App
 	now := metav1.Now()
 
 	var manifestInfos []*apiclient.ManifestResponse
-	targetNsExists := false
 
 	var revisionsMayHaveChanges bool
 
@@ -786,121 +785,6 @@ func (m *appStateManager) CompareAppState(ctx context.Context, app *v1alpha1.App
 	}
 	ts.AddCheckpoint("git_ms")
 
-	var infoProvider kubeutil.ResourceInfoProvider
-	infoProvider, err = m.liveStateCache.GetClusterCache(destCluster)
-	if err != nil {
-		infoProvider = &resourceInfoProviderStub{}
-	}
-
-	targetObjs, dedupConditions, err := NormalizeTargetObjects(app.Spec.Destination.Namespace, targetObjs, infoProvider, func(u *unstructured.Unstructured) error {
-		return m.resourceTracking.SetAppInstance(u, appLabelKey, app.InstanceName(m.namespace), app.Spec.Destination.Namespace, v1alpha1.TrackingMethod(trackingMethod), installationID)
-	})
-	if err != nil {
-		msg := "Failed to normalize target state: " + err.Error()
-		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: msg, LastTransitionTime: &now})
-	}
-	conditions = append(conditions, dedupConditions...)
-
-	for i, v := range slices.Backward(targetObjs) {
-		targetObj := v
-		gvk := targetObj.GroupVersionKind()
-		if resFilter.IsExcludedResource(gvk.Group, gvk.Kind, destCluster.Server) {
-			targetObjs = append(targetObjs[:i], targetObjs[i+1:]...)
-			conditions = append(conditions, v1alpha1.ApplicationCondition{
-				Type:               v1alpha1.ApplicationConditionExcludedResourceWarning,
-				Message:            fmt.Sprintf("Resource %s/%s %s is excluded in the settings", gvk.Group, gvk.Kind, targetObj.GetName()),
-				LastTransitionTime: &now,
-			})
-		}
-
-		// If we reach this path, this means that a namespace has been both defined in Git, as well in the
-		// application's managedNamespaceMetadata. We want to ensure that this manifest is the one being used instead
-		// of what is present in managedNamespaceMetadata.
-		if isManagedNamespace(targetObj, app) {
-			targetNsExists = true
-		}
-	}
-	ts.AddCheckpoint("dedup_ms")
-
-	liveObjByKey, err := m.liveStateCache.GetManagedLiveObjs(destCluster, app, targetObjs)
-	if err != nil {
-		liveObjByKey = make(map[kubeutil.ResourceKey]*unstructured.Unstructured)
-		msg := "Failed to load live state: " + err.Error()
-		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: msg, LastTransitionTime: &now})
-		failedToLoadObjs = true
-	}
-
-	logCtx.Debugf("Retrieved live manifests")
-	// filter out all resources which are not permitted in the application project
-	for k, v := range liveObjByKey {
-		permitted, err := project.IsLiveResourcePermitted(v, destCluster, func(project string) ([]*v1alpha1.Cluster, error) {
-			clusters, err := m.db.GetProjectClusters(ctx, project)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get clusters for project %q: %w", project, err)
-			}
-			return clusters, nil
-		})
-		if err != nil {
-			msg := fmt.Sprintf("Failed to check if live resource %q is permitted in project %q: %s", k.String(), app.Spec.Project, err.Error())
-			conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: msg, LastTransitionTime: &now})
-			failedToLoadObjs = true
-			continue
-		}
-
-		if !permitted {
-			delete(liveObjByKey, k)
-		}
-	}
-
-	for _, liveObj := range liveObjByKey {
-		if liveObj != nil {
-			appInstanceName := m.resourceTracking.GetAppName(liveObj, appLabelKey, v1alpha1.TrackingMethod(trackingMethod), installationID)
-			if appInstanceName != "" && appInstanceName != app.InstanceName(m.namespace) {
-				fqInstanceName := strings.ReplaceAll(appInstanceName, "_", "/")
-				conditions = append(conditions, v1alpha1.ApplicationCondition{
-					Type:               v1alpha1.ApplicationConditionSharedResourceWarning,
-					Message:            fmt.Sprintf("%s/%s is part of applications %s and %s", liveObj.GetKind(), liveObj.GetName(), app.QualifiedName(), fqInstanceName),
-					LastTransitionTime: &now,
-				})
-			}
-
-			// For the case when a namespace is managed with `managedNamespaceMetadata` AND it has resource tracking
-			// enabled (e.g. someone manually adds resource tracking labels or annotations), we need to do some
-			// bookkeeping in order to prevent the managed namespace from being pruned.
-			//
-			// Live namespaces which are managed namespaces (i.e. application namespaces which are managed with
-			// CreateNamespace=true and has non-nil managedNamespaceMetadata) will (usually) not have a corresponding
-			// entry in source control. In order for the namespace not to risk being pruned, we'll need to generate a
-			// namespace which we can compare the live namespace with. For that, we'll do the same as is done in
-			// gitops-engine, the difference here being that we create a managed namespace which is only used for comparison.
-			//
-			// targetNsExists == true implies that it already exists as a target, so no need to add the namespace to the
-			// targetObjs array.
-			if isManagedNamespace(liveObj, app) && !targetNsExists {
-				nsSpec := &corev1.Namespace{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: kubeutil.NamespaceKind}, ObjectMeta: metav1.ObjectMeta{Name: liveObj.GetName()}}
-				managedNs, err := kubeutil.ToUnstructured(nsSpec)
-				if err != nil {
-					conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error(), LastTransitionTime: &now})
-					failedToLoadObjs = true
-					continue
-				}
-
-				// No need to care about the return value here, we just want the modified managedNs
-				_, err = syncNamespace(app.Spec.SyncPolicy)(managedNs, liveObj)
-				if err != nil {
-					conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error(), LastTransitionTime: &now})
-					failedToLoadObjs = true
-				} else {
-					targetObjs = append(targetObjs, managedNs)
-				}
-			}
-		}
-	}
-	targetObjsForSync, hasPreDeleteHooks, hasPostDeleteHooks := partitionTargetObjsForSync(targetObjs)
-
-	reconciliation := sync.Reconcile(targetObjsForSync, liveObjByKey, app.Spec.Destination.Namespace, infoProvider)
-	ts.AddCheckpoint("live_ms")
-
 	compareOptions, err := m.settingsMgr.GetResourceCompareOptions()
 	if err != nil {
 		log.Warnf("Could not get compare options from ConfigMap (assuming defaults): %v", err)
@@ -923,172 +807,29 @@ func (m *appStateManager) CompareAppState(ctx context.Context, app *v1alpha1.App
 
 	useDiffCache := useDiffCache(noCache, manifestInfos, sources, app, manifestRevisions, m.statusRefreshTimeout, serverSideDiff, logCtx)
 
-	diffConfigBuilder := argodiff.NewDiffConfigBuilder().
-		WithDiffSettings(app.Spec.IgnoreDifferences, resourceOverrides, compareOptions.IgnoreAggregatedRoles, m.ignoreNormalizerOpts).
-		WithTracking(appLabelKey, string(trackingMethod))
+	dc := m.compareDestination(ctx, app, project, destCluster, targetObjs, comparisonSettings{
+		appLabelKey:       appLabelKey,
+		resourceOverrides: resourceOverrides,
+		resFilter:         resFilter,
+		installationID:    installationID,
+		trackingMethod:    trackingMethod,
+		compareOptions:    compareOptions,
+		serverSideDiff:    serverSideDiff,
+		useDiffCache:      useDiffCache,
+		now:               now,
+		failedToLoadObjs:  failedToLoadObjs,
+	}, logCtx, ts)
 
-	if useDiffCache {
-		diffConfigBuilder.WithCache(m.cache, app.InstanceName(m.namespace))
-	} else {
-		diffConfigBuilder.WithNoCache()
-	}
-
-	if resourceutil.HasAnnotationOption(app, common.AnnotationCompareOptions, "IncludeMutationWebhook=true") {
-		diffConfigBuilder.WithIgnoreMutationWebhook(false)
-	}
-
-	gvkParser, err := m.getGVKParser(destCluster)
-	if err != nil {
-		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionUnknownError, Message: err.Error(), LastTransitionTime: &now})
-	}
-	diffConfigBuilder.WithGVKParser(gvkParser)
-	diffConfigBuilder.WithManager(common.ArgoCDSSAManager)
-
-	diffConfigBuilder.WithServerSideDiff(serverSideDiff)
-
-	if serverSideDiff {
-		applier, cleanup, err := m.getServerSideDiffDryRunApplier(destCluster, project, app)
-		if err != nil {
-			log.Errorf("CompareAppState error getting server side diff dry run applier: %s", err)
-			conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionUnknownError, Message: err.Error(), LastTransitionTime: &now})
-		} else {
-			defer cleanup()
-			diffConfigBuilder.WithServerSideDryRunner(diff.NewK8sServerSideDryRunner(applier))
-		}
-	}
-
-	// enable structured merge diff if application syncs with server-side apply
-	if app.Spec.SyncPolicy != nil && app.Spec.SyncPolicy.SyncOptions.HasOption("ServerSideApply=true") {
-		diffConfigBuilder.WithStructuredMergeDiff(true)
-	}
-
-	// it is necessary to ignore the error at this point to avoid creating duplicated
-	// application conditions as argo.StateDiffs will validate this diffConfig again.
-	diffConfig, _ := diffConfigBuilder.Build()
-
-	// Scope the diff span with a closure so it ends even if StateDiffs panics, while keeping
-	// it attributed to just the diff rather than the rest of CompareAppState.
-	var diffResults *diff.DiffResultList
-	err = func() (retErr error) {
-		_, diffSpan := tracer.Start(ctx, "controller.diff")
-		defer func() { traceutil.EndSpan(diffSpan, retErr) }()
-		diffResults, retErr = argodiff.StateDiffs(ctx, reconciliation.Live, reconciliation.Target, diffConfig)
-		return retErr
-	}()
-	if err != nil {
-		diffResults = &diff.DiffResultList{}
-		failedToLoadObjs = true
-		msg := "Failed to compare desired state to live state: " + err.Error()
-		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: msg, LastTransitionTime: &now})
-	}
-	ts.AddCheckpoint("diff_ms")
-
-	syncCode := v1alpha1.SyncStatusCodeSynced
-	managedResources := make([]managedResource, len(reconciliation.Target))
-	resourceSummaries := make([]v1alpha1.ResourceStatus, len(reconciliation.Target))
-	for i, targetObj := range reconciliation.Target {
-		liveObj := reconciliation.Live[i]
-		obj := liveObj
-		if obj == nil {
-			obj = targetObj
-		}
-		if obj == nil {
-			continue
-		}
-		gvk := obj.GroupVersionKind()
-
-		isSelfReferencedObj := m.isSelfReferencedObj(liveObj, targetObj, app.GetName(), v1alpha1.TrackingMethod(trackingMethod), installationID)
-
-		resState := v1alpha1.ResourceStatus{
-			Namespace:                    obj.GetNamespace(),
-			Name:                         obj.GetName(),
-			Kind:                         gvk.Kind,
-			Version:                      gvk.Version,
-			Group:                        gvk.Group,
-			Hook:                         isHook(obj),
-			RequiresPruning:              targetObj == nil && liveObj != nil && isSelfReferencedObj,
-			RequiresDeletionConfirmation: isObjRequiresDeletionConfirmation(targetObj, app) || isObjRequiresDeletionConfirmation(liveObj, app),
-		}
-		if targetObj != nil {
-			resState.SyncWave = int64(syncwaves.Wave(targetObj))
-		} else if resState.Hook {
-			for _, hookObj := range reconciliation.Hooks {
-				if hookObj.GetName() == liveObj.GetName() && hookObj.GetKind() == liveObj.GetKind() && hookObj.GetNamespace() == liveObj.GetNamespace() {
-					resState.SyncWave = int64(syncwaves.Wave(hookObj))
-					break
-				}
-			}
-		}
-
-		var diffResult diff.DiffResult
-		if i < len(diffResults.Diffs) {
-			diffResult = diffResults.Diffs[i]
-		} else {
-			diffResult = diff.DiffResult{Modified: false, NormalizedLive: []byte("{}"), PredictedLive: []byte("{}")}
-		}
-
-		// For the case when a namespace is managed with `managedNamespaceMetadata` AND it has resource tracking
-		// enabled (e.g. someone manually adds resource tracking labels or annotations), we need to do some
-		// bookkeeping in order to ensure that it's not considered `OutOfSync` (since it does not exist in source
-		// control).
-		//
-		// This is in addition to the bookkeeping we do (see `isManagedNamespace` and its references) to prevent said
-		// namespace from being pruned.
-		isManagedNs := isManagedNamespace(targetObj, app) && liveObj == nil
-
-		switch {
-		case resState.Hook || ignore.Ignore(obj) || (targetObj != nil && hookutil.Skip(targetObj)) || !isSelfReferencedObj:
-			// For resource hooks, skipped resources or objects that may have
-			// been created by another controller with annotations copied from
-			// the source object, don't store sync status, and do not affect
-			// overall sync status
-		case !isManagedNs && (diffResult.Modified || targetObj == nil || liveObj == nil):
-			// Set resource state to OutOfSync since one of the following is true:
-			// * target and live resource are different
-			// * target resource not defined and live resource is extra
-			// * target resource present but live resource is missing
-			resState.Status = v1alpha1.SyncStatusCodeOutOfSync
-			// we ignore the status if the obj needs pruning AND we have the annotation
-			needsPruning := targetObj == nil && liveObj != nil
-			if !needsPruning || !resourceutil.HasAnnotationOption(obj, common.AnnotationCompareOptions, "IgnoreExtraneous") {
-				syncCode = v1alpha1.SyncStatusCodeOutOfSync
-			}
-		default:
-			resState.Status = v1alpha1.SyncStatusCodeSynced
-		}
-		// set unknown status to all resource that are not permitted in the app project
-		isNamespaced, err := m.liveStateCache.IsNamespaced(destCluster, gvk.GroupKind())
-		if !project.IsGroupKindNamePermitted(gvk.GroupKind(), obj.GetName(), isNamespaced && err == nil) {
-			resState.Status = v1alpha1.SyncStatusCodeUnknown
-		}
-
-		if isNamespaced && obj.GetNamespace() == "" {
-			conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionInvalidSpecError, Message: fmt.Sprintf("Namespace for %s %s is missing.", obj.GetName(), gvk.String()), LastTransitionTime: &now})
-		}
-
-		// we can't say anything about the status if we were unable to get the target objects
-		if failedToLoadObjs {
-			resState.Status = v1alpha1.SyncStatusCodeUnknown
-		}
-
-		resourceVersion := ""
-		if liveObj != nil {
-			resourceVersion = liveObj.GetResourceVersion()
-		}
-		managedResources[i] = managedResource{
-			Name:            resState.Name,
-			Namespace:       resState.Namespace,
-			Group:           resState.Group,
-			Kind:            resState.Kind,
-			Version:         resState.Version,
-			Live:            liveObj,
-			Target:          targetObj,
-			Diff:            diffResult,
-			Hook:            resState.Hook,
-			ResourceVersion: resourceVersion,
-		}
-		resourceSummaries[i] = resState
-	}
+	conditions = append(conditions, dc.conditions...)
+	failedToLoadObjs = dc.failedToLoadObjs
+	reconciliation := dc.reconciliationResult
+	diffConfig := dc.diffConfig
+	diffResults := dc.diffResultList
+	managedResources := dc.managedResources
+	resourceSummaries := dc.resources
+	syncCode := dc.syncCode
+	hasPreDeleteHooks := dc.hasPreDeleteHooks
+	hasPostDeleteHooks := dc.hasPostDeleteHooks
 
 	if failedToLoadObjs {
 		syncCode = v1alpha1.SyncStatusCodeUnknown
@@ -1394,4 +1135,364 @@ func isSelfReferencedObj(obj *unstructured.Unstructured, aiv argo.AppInstanceVal
 		obj.GetName() == aiv.Name &&
 		obj.GetObjectKind().GroupVersionKind().Group == aiv.Group &&
 		obj.GetObjectKind().GroupVersionKind().Kind == aiv.Kind
+}
+
+// comparisonSettings carries the application-level settings shared by every destination's
+// comparison. They are resolved once per CompareAppState call.
+type comparisonSettings struct {
+	appLabelKey       string
+	resourceOverrides map[string]v1alpha1.ResourceOverride
+	resFilter         *settings.ResourcesFilter
+	installationID    string
+	trackingMethod    string
+	compareOptions    settings.ArgoCDDiffOptions
+	serverSideDiff    bool
+	useDiffCache      bool
+	now               metav1.Time
+	// failedToLoadObjs reports whether target manifests could not be generated at all, in which
+	// case no resource can be given a meaningful sync status.
+	failedToLoadObjs bool
+}
+
+// destinationComparison holds the result of comparing one destination's slice of an application's
+// target manifests against that destination's live state.
+type destinationComparison struct {
+	reconciliationResult sync.ReconciliationResult
+	diffConfig           argodiff.DiffConfig
+	diffResultList       *diff.DiffResultList
+	managedResources     []managedResource
+	resources            []v1alpha1.ResourceStatus
+	syncCode             v1alpha1.SyncStatusCode
+	conditions           []v1alpha1.ApplicationCondition
+	failedToLoadObjs     bool
+	hasPreDeleteHooks    bool
+	hasPostDeleteHooks   bool
+}
+
+// compareDestination compares targetObjs against the live state of a single destination cluster.
+//
+// Every step here is destination-specific: the cluster cache that decides whether a resource is
+// namespaced, the default namespace stamped into the tracking annotation, the resource exclusion
+// filter (which is keyed by server URL), the live objects, the project permission check, the GVK
+// parser used for server-side diff, and the dry-run applier. Keeping them together in one function
+// is what allows an application to compare against more than one cluster.
+func (m *appStateManager) compareDestination(
+	ctx context.Context,
+	app *v1alpha1.Application,
+	project *v1alpha1.AppProject,
+	destCluster *v1alpha1.Cluster,
+	targetObjs []*unstructured.Unstructured,
+	cs comparisonSettings,
+	logCtx *log.Entry,
+	ts *stats.TimingStats,
+) destinationComparison {
+	appLabelKey := cs.appLabelKey
+	resourceOverrides := cs.resourceOverrides
+	resFilter := cs.resFilter
+	installationID := cs.installationID
+	trackingMethod := cs.trackingMethod
+	compareOptions := cs.compareOptions
+	serverSideDiff := cs.serverSideDiff
+	useDiffCache := cs.useDiffCache
+	now := cs.now
+	failedToLoadObjs := cs.failedToLoadObjs
+
+	var conditions []v1alpha1.ApplicationCondition
+	var err error
+	targetNsExists := false
+
+	var infoProvider kubeutil.ResourceInfoProvider
+	infoProvider, err = m.liveStateCache.GetClusterCache(destCluster)
+	if err != nil {
+		infoProvider = &resourceInfoProviderStub{}
+	}
+
+	targetObjs, dedupConditions, err := NormalizeTargetObjects(app.Spec.Destination.Namespace, targetObjs, infoProvider, func(u *unstructured.Unstructured) error {
+		return m.resourceTracking.SetAppInstance(u, appLabelKey, app.InstanceName(m.namespace), app.Spec.Destination.Namespace, v1alpha1.TrackingMethod(trackingMethod), installationID)
+	})
+	if err != nil {
+		msg := "Failed to normalize target state: " + err.Error()
+		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: msg, LastTransitionTime: &now})
+	}
+	conditions = append(conditions, dedupConditions...)
+
+	for i, v := range slices.Backward(targetObjs) {
+		targetObj := v
+		gvk := targetObj.GroupVersionKind()
+		if resFilter.IsExcludedResource(gvk.Group, gvk.Kind, destCluster.Server) {
+			targetObjs = append(targetObjs[:i], targetObjs[i+1:]...)
+			conditions = append(conditions, v1alpha1.ApplicationCondition{
+				Type:               v1alpha1.ApplicationConditionExcludedResourceWarning,
+				Message:            fmt.Sprintf("Resource %s/%s %s is excluded in the settings", gvk.Group, gvk.Kind, targetObj.GetName()),
+				LastTransitionTime: &now,
+			})
+		}
+
+		// If we reach this path, this means that a namespace has been both defined in Git, as well in the
+		// application's managedNamespaceMetadata. We want to ensure that this manifest is the one being used instead
+		// of what is present in managedNamespaceMetadata.
+		if isManagedNamespace(targetObj, app) {
+			targetNsExists = true
+		}
+	}
+	ts.AddCheckpoint("dedup_ms")
+
+	liveObjByKey, err := m.liveStateCache.GetManagedLiveObjs(destCluster, app, targetObjs)
+	if err != nil {
+		liveObjByKey = make(map[kubeutil.ResourceKey]*unstructured.Unstructured)
+		msg := "Failed to load live state: " + err.Error()
+		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: msg, LastTransitionTime: &now})
+		failedToLoadObjs = true
+	}
+
+	logCtx.Debugf("Retrieved live manifests")
+	// filter out all resources which are not permitted in the application project
+	for k, v := range liveObjByKey {
+		permitted, err := project.IsLiveResourcePermitted(v, destCluster, func(project string) ([]*v1alpha1.Cluster, error) {
+			clusters, err := m.db.GetProjectClusters(ctx, project)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get clusters for project %q: %w", project, err)
+			}
+			return clusters, nil
+		})
+		if err != nil {
+			msg := fmt.Sprintf("Failed to check if live resource %q is permitted in project %q: %s", k.String(), app.Spec.Project, err.Error())
+			conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: msg, LastTransitionTime: &now})
+			failedToLoadObjs = true
+			continue
+		}
+
+		if !permitted {
+			delete(liveObjByKey, k)
+		}
+	}
+
+	for _, liveObj := range liveObjByKey {
+		if liveObj != nil {
+			appInstanceName := m.resourceTracking.GetAppName(liveObj, appLabelKey, v1alpha1.TrackingMethod(trackingMethod), installationID)
+			if appInstanceName != "" && appInstanceName != app.InstanceName(m.namespace) {
+				fqInstanceName := strings.ReplaceAll(appInstanceName, "_", "/")
+				conditions = append(conditions, v1alpha1.ApplicationCondition{
+					Type:               v1alpha1.ApplicationConditionSharedResourceWarning,
+					Message:            fmt.Sprintf("%s/%s is part of applications %s and %s", liveObj.GetKind(), liveObj.GetName(), app.QualifiedName(), fqInstanceName),
+					LastTransitionTime: &now,
+				})
+			}
+
+			// For the case when a namespace is managed with `managedNamespaceMetadata` AND it has resource tracking
+			// enabled (e.g. someone manually adds resource tracking labels or annotations), we need to do some
+			// bookkeeping in order to prevent the managed namespace from being pruned.
+			//
+			// Live namespaces which are managed namespaces (i.e. application namespaces which are managed with
+			// CreateNamespace=true and has non-nil managedNamespaceMetadata) will (usually) not have a corresponding
+			// entry in source control. In order for the namespace not to risk being pruned, we'll need to generate a
+			// namespace which we can compare the live namespace with. For that, we'll do the same as is done in
+			// gitops-engine, the difference here being that we create a managed namespace which is only used for comparison.
+			//
+			// targetNsExists == true implies that it already exists as a target, so no need to add the namespace to the
+			// targetObjs array.
+			if isManagedNamespace(liveObj, app) && !targetNsExists {
+				nsSpec := &corev1.Namespace{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: kubeutil.NamespaceKind}, ObjectMeta: metav1.ObjectMeta{Name: liveObj.GetName()}}
+				managedNs, err := kubeutil.ToUnstructured(nsSpec)
+				if err != nil {
+					conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error(), LastTransitionTime: &now})
+					failedToLoadObjs = true
+					continue
+				}
+
+				// No need to care about the return value here, we just want the modified managedNs
+				_, err = syncNamespace(app.Spec.SyncPolicy)(managedNs, liveObj)
+				if err != nil {
+					conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: err.Error(), LastTransitionTime: &now})
+					failedToLoadObjs = true
+				} else {
+					targetObjs = append(targetObjs, managedNs)
+				}
+			}
+		}
+	}
+	targetObjsForSync, hasPreDeleteHooks, hasPostDeleteHooks := partitionTargetObjsForSync(targetObjs)
+
+	reconciliation := sync.Reconcile(targetObjsForSync, liveObjByKey, app.Spec.Destination.Namespace, infoProvider)
+	ts.AddCheckpoint("live_ms")
+
+	diffConfigBuilder := argodiff.NewDiffConfigBuilder().
+		WithDiffSettings(app.Spec.IgnoreDifferences, resourceOverrides, compareOptions.IgnoreAggregatedRoles, m.ignoreNormalizerOpts).
+		WithTracking(appLabelKey, string(trackingMethod))
+
+	if useDiffCache {
+		diffConfigBuilder.WithCache(m.cache, app.InstanceName(m.namespace))
+	} else {
+		diffConfigBuilder.WithNoCache()
+	}
+
+	if resourceutil.HasAnnotationOption(app, common.AnnotationCompareOptions, "IncludeMutationWebhook=true") {
+		diffConfigBuilder.WithIgnoreMutationWebhook(false)
+	}
+
+	gvkParser, err := m.getGVKParser(destCluster)
+	if err != nil {
+		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionUnknownError, Message: err.Error(), LastTransitionTime: &now})
+	}
+	diffConfigBuilder.WithGVKParser(gvkParser)
+	diffConfigBuilder.WithManager(common.ArgoCDSSAManager)
+
+	diffConfigBuilder.WithServerSideDiff(serverSideDiff)
+
+	if serverSideDiff {
+		applier, cleanup, err := m.getServerSideDiffDryRunApplier(destCluster, project, app)
+		if err != nil {
+			log.Errorf("CompareAppState error getting server side diff dry run applier: %s", err)
+			conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionUnknownError, Message: err.Error(), LastTransitionTime: &now})
+		} else {
+			defer cleanup()
+			diffConfigBuilder.WithServerSideDryRunner(diff.NewK8sServerSideDryRunner(applier))
+		}
+	}
+
+	// enable structured merge diff if application syncs with server-side apply
+	if app.Spec.SyncPolicy != nil && app.Spec.SyncPolicy.SyncOptions.HasOption("ServerSideApply=true") {
+		diffConfigBuilder.WithStructuredMergeDiff(true)
+	}
+
+	// it is necessary to ignore the error at this point to avoid creating duplicated
+	// application conditions as argo.StateDiffs will validate this diffConfig again.
+	diffConfig, _ := diffConfigBuilder.Build()
+
+	// Scope the diff span with a closure so it ends even if StateDiffs panics, while keeping
+	// it attributed to just the diff rather than the rest of CompareAppState.
+	var diffResults *diff.DiffResultList
+	err = func() (retErr error) {
+		_, diffSpan := tracer.Start(ctx, "controller.diff")
+		defer func() { traceutil.EndSpan(diffSpan, retErr) }()
+		diffResults, retErr = argodiff.StateDiffs(ctx, reconciliation.Live, reconciliation.Target, diffConfig)
+		return retErr
+	}()
+	if err != nil {
+		diffResults = &diff.DiffResultList{}
+		failedToLoadObjs = true
+		msg := "Failed to compare desired state to live state: " + err.Error()
+		conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionComparisonError, Message: msg, LastTransitionTime: &now})
+	}
+	ts.AddCheckpoint("diff_ms")
+
+	syncCode := v1alpha1.SyncStatusCodeSynced
+	managedResources := make([]managedResource, len(reconciliation.Target))
+	resourceSummaries := make([]v1alpha1.ResourceStatus, len(reconciliation.Target))
+	for i, targetObj := range reconciliation.Target {
+		liveObj := reconciliation.Live[i]
+		obj := liveObj
+		if obj == nil {
+			obj = targetObj
+		}
+		if obj == nil {
+			continue
+		}
+		gvk := obj.GroupVersionKind()
+
+		isSelfReferencedObj := m.isSelfReferencedObj(liveObj, targetObj, app.GetName(), v1alpha1.TrackingMethod(trackingMethod), installationID)
+
+		resState := v1alpha1.ResourceStatus{
+			Namespace:                    obj.GetNamespace(),
+			Name:                         obj.GetName(),
+			Kind:                         gvk.Kind,
+			Version:                      gvk.Version,
+			Group:                        gvk.Group,
+			Hook:                         isHook(obj),
+			RequiresPruning:              targetObj == nil && liveObj != nil && isSelfReferencedObj,
+			RequiresDeletionConfirmation: isObjRequiresDeletionConfirmation(targetObj, app) || isObjRequiresDeletionConfirmation(liveObj, app),
+		}
+		if targetObj != nil {
+			resState.SyncWave = int64(syncwaves.Wave(targetObj))
+		} else if resState.Hook {
+			for _, hookObj := range reconciliation.Hooks {
+				if hookObj.GetName() == liveObj.GetName() && hookObj.GetKind() == liveObj.GetKind() && hookObj.GetNamespace() == liveObj.GetNamespace() {
+					resState.SyncWave = int64(syncwaves.Wave(hookObj))
+					break
+				}
+			}
+		}
+
+		var diffResult diff.DiffResult
+		if i < len(diffResults.Diffs) {
+			diffResult = diffResults.Diffs[i]
+		} else {
+			diffResult = diff.DiffResult{Modified: false, NormalizedLive: []byte("{}"), PredictedLive: []byte("{}")}
+		}
+
+		// For the case when a namespace is managed with `managedNamespaceMetadata` AND it has resource tracking
+		// enabled (e.g. someone manually adds resource tracking labels or annotations), we need to do some
+		// bookkeeping in order to ensure that it's not considered `OutOfSync` (since it does not exist in source
+		// control).
+		//
+		// This is in addition to the bookkeeping we do (see `isManagedNamespace` and its references) to prevent said
+		// namespace from being pruned.
+		isManagedNs := isManagedNamespace(targetObj, app) && liveObj == nil
+
+		switch {
+		case resState.Hook || ignore.Ignore(obj) || (targetObj != nil && hookutil.Skip(targetObj)) || !isSelfReferencedObj:
+			// For resource hooks, skipped resources or objects that may have
+			// been created by another controller with annotations copied from
+			// the source object, don't store sync status, and do not affect
+			// overall sync status
+		case !isManagedNs && (diffResult.Modified || targetObj == nil || liveObj == nil):
+			// Set resource state to OutOfSync since one of the following is true:
+			// * target and live resource are different
+			// * target resource not defined and live resource is extra
+			// * target resource present but live resource is missing
+			resState.Status = v1alpha1.SyncStatusCodeOutOfSync
+			// we ignore the status if the obj needs pruning AND we have the annotation
+			needsPruning := targetObj == nil && liveObj != nil
+			if !needsPruning || !resourceutil.HasAnnotationOption(obj, common.AnnotationCompareOptions, "IgnoreExtraneous") {
+				syncCode = v1alpha1.SyncStatusCodeOutOfSync
+			}
+		default:
+			resState.Status = v1alpha1.SyncStatusCodeSynced
+		}
+		// set unknown status to all resource that are not permitted in the app project
+		isNamespaced, err := m.liveStateCache.IsNamespaced(destCluster, gvk.GroupKind())
+		if !project.IsGroupKindNamePermitted(gvk.GroupKind(), obj.GetName(), isNamespaced && err == nil) {
+			resState.Status = v1alpha1.SyncStatusCodeUnknown
+		}
+
+		if isNamespaced && obj.GetNamespace() == "" {
+			conditions = append(conditions, v1alpha1.ApplicationCondition{Type: v1alpha1.ApplicationConditionInvalidSpecError, Message: fmt.Sprintf("Namespace for %s %s is missing.", obj.GetName(), gvk.String()), LastTransitionTime: &now})
+		}
+
+		// we can't say anything about the status if we were unable to get the target objects
+		if failedToLoadObjs {
+			resState.Status = v1alpha1.SyncStatusCodeUnknown
+		}
+
+		resourceVersion := ""
+		if liveObj != nil {
+			resourceVersion = liveObj.GetResourceVersion()
+		}
+		managedResources[i] = managedResource{
+			Name:            resState.Name,
+			Namespace:       resState.Namespace,
+			Group:           resState.Group,
+			Kind:            resState.Kind,
+			Version:         resState.Version,
+			Live:            liveObj,
+			Target:          targetObj,
+			Diff:            diffResult,
+			Hook:            resState.Hook,
+			ResourceVersion: resourceVersion,
+		}
+		resourceSummaries[i] = resState
+	}
+
+	return destinationComparison{
+		reconciliationResult: reconciliation,
+		diffConfig:           diffConfig,
+		diffResultList:       diffResults,
+		managedResources:     managedResources,
+		resources:            resourceSummaries,
+		syncCode:             syncCode,
+		conditions:           conditions,
+		failedToLoadObjs:     failedToLoadObjs,
+		hasPreDeleteHooks:    hasPreDeleteHooks,
+		hasPostDeleteHooks:   hasPostDeleteHooks,
+	}
 }
