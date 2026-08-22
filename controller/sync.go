@@ -102,7 +102,7 @@ func (m *appStateManager) applyDiffImpersonationConfig(config *rest.Config, proj
 	if !impersonationEnabled {
 		return nil
 	}
-	serviceAccountToImpersonate, err := settings.DeriveServiceAccountToImpersonate(project, app, destCluster)
+	serviceAccountToImpersonate, err := settings.DeriveServiceAccountToImpersonate(project, app, destCluster, app.Spec.Destination.Namespace)
 	if err != nil {
 		return fmt.Errorf("error deriving service account to impersonate: %w", err)
 	}
@@ -338,7 +338,7 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 		return
 	}
 	if impersonationEnabled {
-		serviceAccountToImpersonate, err := settings.DeriveServiceAccountToImpersonate(project, app, destCluster)
+		serviceAccountToImpersonate, err := settings.DeriveServiceAccountToImpersonate(project, app, destCluster, app.Spec.Destination.Namespace)
 		if err != nil {
 			state.Phase = common.OperationError
 			state.Message = fmt.Sprintf("failed to derive service account to impersonate: %v", err)
