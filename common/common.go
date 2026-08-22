@@ -218,6 +218,10 @@ const (
 	// AnnotationCompareOptions is a comma-separated list of options for comparison
 	AnnotationCompareOptions = "argocd.argoproj.io/compare-options"
 
+	// AnnotationKeyDestination selects which of the Application's spec.destinations a manifest is
+	// deployed to. An unset annotation means the Application's spec.destination.
+	AnnotationKeyDestination = "argocd.argoproj.io/destination"
+
 	// AnnotationClientSideApplyMigrationManager specifies a custom field manager for client-side apply migration
 	AnnotationClientSideApplyMigrationManager = "argocd.argoproj.io/client-side-apply-migration-manager"
 

@@ -101,6 +101,21 @@ spec:
                                     server:
                                       type: string
                                   type: object
+                                destinations:
+                                  items:
+                                    properties:
+                                      clusterName:
+                                        type: string
+                                      name:
+                                        type: string
+                                      namespace:
+                                        type: string
+                                      server:
+                                        type: string
+                                    required:
+                                    - name
+                                    type: object
+                                  type: array
                                 ignoreDifferences:
                                   items:
                                     properties:
@@ -1021,6 +1036,21 @@ spec:
                                     server:
                                       type: string
                                   type: object
+                                destinations:
+                                  items:
+                                    properties:
+                                      clusterName:
+                                        type: string
+                                      name:
+                                        type: string
+                                      namespace:
+                                        type: string
+                                      server:
+                                        type: string
+                                    required:
+                                    - name
+                                    type: object
+                                  type: array
                                 ignoreDifferences:
                                   items:
                                     properties:
@@ -1942,6 +1972,21 @@ spec:
                                     server:
                                       type: string
                                   type: object
+                                destinations:
+                                  items:
+                                    properties:
+                                      clusterName:
+                                        type: string
+                                      name:
+                                        type: string
+                                      namespace:
+                                        type: string
+                                      server:
+                                        type: string
+                                    required:
+                                    - name
+                                    type: object
+                                  type: array
                                 ignoreDifferences:
                                   items:
                                     properties:
@@ -2841,6 +2886,21 @@ spec:
                                     server:
                                       type: string
                                   type: object
+                                destinations:
+                                  items:
+                                    properties:
+                                      clusterName:
+                                        type: string
+                                      name:
+                                        type: string
+                                      namespace:
+                                        type: string
+                                      server:
+                                        type: string
+                                    required:
+                                    - name
+                                    type: object
+                                  type: array
                                 ignoreDifferences:
                                   items:
                                     properties:
@@ -3765,6 +3825,21 @@ spec:
                                               server:
                                                 type: string
                                             type: object
+                                          destinations:
+                                            items:
+                                              properties:
+                                                clusterName:
+                                                  type: string
+                                                name:
+                                                  type: string
+                                                namespace:
+                                                  type: string
+                                                server:
+                                                  type: string
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
                                           ignoreDifferences:
                                             items:
                                               properties:
@@ -4685,6 +4760,21 @@ spec:
                                               server:
                                                 type: string
                                             type: object
+                                          destinations:
+                                            items:
+                                              properties:
+                                                clusterName:
+                                                  type: string
+                                                name:
+                                                  type: string
+                                                namespace:
+                                                  type: string
+                                                server:
+                                                  type: string
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
                                           ignoreDifferences:
                                             items:
                                               properties:
@@ -5606,6 +5696,21 @@ spec:
                                               server:
                                                 type: string
                                             type: object
+                                          destinations:
+                                            items:
+                                              properties:
+                                                clusterName:
+                                                  type: string
+                                                name:
+                                                  type: string
+                                                namespace:
+                                                  type: string
+                                                server:
+                                                  type: string
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
                                           ignoreDifferences:
                                             items:
                                               properties:
@@ -6505,6 +6610,21 @@ spec:
                                               server:
                                                 type: string
                                             type: object
+                                          destinations:
+                                            items:
+                                              properties:
+                                                clusterName:
+                                                  type: string
+                                                name:
+                                                  type: string
+                                                namespace:
+                                                  type: string
+                                                server:
+                                                  type: string
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
                                           ignoreDifferences:
                                             items:
                                               properties:
@@ -7412,6 +7532,21 @@ spec:
                                               server:
                                                 type: string
                                             type: object
+                                          destinations:
+                                            items:
+                                              properties:
+                                                clusterName:
+                                                  type: string
+                                                name:
+                                                  type: string
+                                                namespace:
+                                                  type: string
+                                                server:
+                                                  type: string
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
                                           ignoreDifferences:
                                             items:
                                               properties:
@@ -8546,6 +8681,21 @@ spec:
                                               server:
                                                 type: string
                                             type: object
+                                          destinations:
+                                            items:
+                                              properties:
+                                                clusterName:
+                                                  type: string
+                                                name:
+                                                  type: string
+                                                namespace:
+                                                  type: string
+                                                server:
+                                                  type: string
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
                                           ignoreDifferences:
                                             items:
                                               properties:
@@ -9677,6 +9827,21 @@ spec:
                                               server:
                                                 type: string
                                             type: object
+                                          destinations:
+                                            items:
+                                              properties:
+                                                clusterName:
+                                                  type: string
+                                                name:
+                                                  type: string
+                                                namespace:
+                                                  type: string
+                                                server:
+                                                  type: string
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
                                           ignoreDifferences:
                                             items:
                                               properties:
@@ -10593,6 +10758,21 @@ spec:
                                     server:
                                       type: string
                                   type: object
+                                destinations:
+                                  items:
+                                    properties:
+                                      clusterName:
+                                        type: string
+                                      name:
+                                        type: string
+                                      namespace:
+                                        type: string
+                                      server:
+                                        type: string
+                                    required:
+                                    - name
+                                    type: object
+                                  type: array
                                 ignoreDifferences:
                                   items:
                                     properties:
@@ -11519,6 +11699,21 @@ spec:
                                               server:
                                                 type: string
                                             type: object
+                                          destinations:
+                                            items:
+                                              properties:
+                                                clusterName:
+                                                  type: string
+                                                name:
+                                                  type: string
+                                                namespace:
+                                                  type: string
+                                                server:
+                                                  type: string
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
                                           ignoreDifferences:
                                             items:
                                               properties:
@@ -12439,6 +12634,21 @@ spec:
                                               server:
                                                 type: string
                                             type: object
+                                          destinations:
+                                            items:
+                                              properties:
+                                                clusterName:
+                                                  type: string
+                                                name:
+                                                  type: string
+                                                namespace:
+                                                  type: string
+                                                server:
+                                                  type: string
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
                                           ignoreDifferences:
                                             items:
                                               properties:
@@ -13360,6 +13570,21 @@ spec:
                                               server:
                                                 type: string
                                             type: object
+                                          destinations:
+                                            items:
+                                              properties:
+                                                clusterName:
+                                                  type: string
+                                                name:
+                                                  type: string
+                                                namespace:
+                                                  type: string
+                                                server:
+                                                  type: string
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
                                           ignoreDifferences:
                                             items:
                                               properties:
@@ -14259,6 +14484,21 @@ spec:
                                               server:
                                                 type: string
                                             type: object
+                                          destinations:
+                                            items:
+                                              properties:
+                                                clusterName:
+                                                  type: string
+                                                name:
+                                                  type: string
+                                                namespace:
+                                                  type: string
+                                                server:
+                                                  type: string
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
                                           ignoreDifferences:
                                             items:
                                               properties:
@@ -15166,6 +15406,21 @@ spec:
                                               server:
                                                 type: string
                                             type: object
+                                          destinations:
+                                            items:
+                                              properties:
+                                                clusterName:
+                                                  type: string
+                                                name:
+                                                  type: string
+                                                namespace:
+                                                  type: string
+                                                server:
+                                                  type: string
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
                                           ignoreDifferences:
                                             items:
                                               properties:
@@ -16300,6 +16555,21 @@ spec:
                                               server:
                                                 type: string
                                             type: object
+                                          destinations:
+                                            items:
+                                              properties:
+                                                clusterName:
+                                                  type: string
+                                                name:
+                                                  type: string
+                                                namespace:
+                                                  type: string
+                                                server:
+                                                  type: string
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
                                           ignoreDifferences:
                                             items:
                                               properties:
@@ -17431,6 +17701,21 @@ spec:
                                               server:
                                                 type: string
                                             type: object
+                                          destinations:
+                                            items:
+                                              properties:
+                                                clusterName:
+                                                  type: string
+                                                name:
+                                                  type: string
+                                                namespace:
+                                                  type: string
+                                                server:
+                                                  type: string
+                                              required:
+                                              - name
+                                              type: object
+                                            type: array
                                           ignoreDifferences:
                                             items:
                                               properties:
@@ -18351,6 +18636,21 @@ spec:
                                     server:
                                       type: string
                                   type: object
+                                destinations:
+                                  items:
+                                    properties:
+                                      clusterName:
+                                        type: string
+                                      name:
+                                        type: string
+                                      namespace:
+                                        type: string
+                                      server:
+                                        type: string
+                                    required:
+                                    - name
+                                    type: object
+                                  type: array
                                 ignoreDifferences:
                                   items:
                                     properties:
@@ -19257,6 +19557,21 @@ spec:
                                     server:
                                       type: string
                                   type: object
+                                destinations:
+                                  items:
+                                    properties:
+                                      clusterName:
+                                        type: string
+                                      name:
+                                        type: string
+                                      namespace:
+                                        type: string
+                                      server:
+                                        type: string
+                                    required:
+                                    - name
+                                    type: object
+                                  type: array
                                 ignoreDifferences:
                                   items:
                                     properties:
@@ -20391,6 +20706,21 @@ spec:
                                     server:
                                       type: string
                                   type: object
+                                destinations:
+                                  items:
+                                    properties:
+                                      clusterName:
+                                        type: string
+                                      name:
+                                        type: string
+                                      namespace:
+                                        type: string
+                                      server:
+                                        type: string
+                                    required:
+                                    - name
+                                    type: object
+                                  type: array
                                 ignoreDifferences:
                                   items:
                                     properties:
@@ -21522,6 +21852,21 @@ spec:
                                     server:
                                       type: string
                                   type: object
+                                destinations:
+                                  items:
+                                    properties:
+                                      clusterName:
+                                        type: string
+                                      name:
+                                        type: string
+                                      namespace:
+                                        type: string
+                                      server:
+                                        type: string
+                                    required:
+                                    - name
+                                    type: object
+                                  type: array
                                 ignoreDifferences:
                                   items:
                                     properties:
@@ -22515,6 +22860,21 @@ spec:
                           server:
                             type: string
                         type: object
+                      destinations:
+                        items:
+                          properties:
+                            clusterName:
+                              type: string
+                            name:
+                              type: string
+                            namespace:
+                              type: string
+                            server:
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
                       ignoreDifferences:
                         items:
                           properties:
@@ -23434,6 +23794,8 @@ spec:
               resources:
                 items:
                   properties:
+                    destination:
+                      type: string
                     group:
                       type: string
                     health:

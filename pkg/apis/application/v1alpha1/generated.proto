@@ -696,6 +696,11 @@ message ApplicationSpec {
   // Destination is a reference to the target Kubernetes server and namespace
   optional ApplicationDestination destination = 2;
 
+  // Destinations is a list of additional named destinations that individual manifests may target
+  // using the argocd.argoproj.io/destination annotation. Manifests without that annotation are
+  // deployed to Destination.
+  repeated NamedDestination destinations = 10;
+
   // Project is a reference to the project this application belongs to.
   // The empty string means that application belongs to the 'default' project.
   optional string project = 3;
@@ -1045,6 +1050,9 @@ message ComparedTo {
 
   // IgnoreDifferences is a reference to the application's ignored differences used for comparison
   repeated ResourceIgnoreDifferences ignoreDifferences = 4;
+
+  // Destinations is a reference to the application's additional named destinations used for comparison
+  repeated NamedDestination destinations = 5;
 }
 
 // ComponentParameter contains information about component parameter value
@@ -1494,6 +1502,25 @@ message MergeGenerator {
   repeated string mergeKeys = 2;
 
   optional ApplicationSetTemplate template = 3;
+}
+
+// NamedDestination is an additional deployment destination of an Application. Individual manifests
+// select one by name using the argocd.argoproj.io/destination annotation. Manifests without that
+// annotation are deployed to the Application's spec.destination.
+message NamedDestination {
+  // Name uniquely identifies this destination within the Application. It is the value referenced by
+  // the argocd.argoproj.io/destination annotation on a manifest. It must not contain '/' or '@'.
+  optional string name = 1;
+
+  // Server specifies the URL of the target cluster's Kubernetes control plane API. This must be set if ClusterName is not set.
+  optional string server = 2;
+
+  // Namespace specifies the target namespace for resources routed to this destination.
+  // The namespace will only be set for namespace-scoped resources that have not set a value for .metadata.namespace
+  optional string namespace = 3;
+
+  // ClusterName is an alternate way of specifying the target cluster by its symbolic name. This must be set if Server is not set.
+  optional string clusterName = 4;
 }
 
 // NestedMatrixGenerator is a MatrixGenerator nested under another combination-type generator (MatrixGenerator or
@@ -2160,6 +2187,10 @@ message ResourceDiff {
 
   // Modified indicates whether the live resource has changes compared to the target resource.
   optional bool modified = 12;
+
+  // Destination is the name of the Application destination this resource belongs to.
+  // Empty means the Application's spec.destination.
+  optional string destination = 13;
 }
 
 // ResourceIgnoreDifferences contains resource filter and list of json paths which should be ignored during comparison with live state.
@@ -2264,6 +2295,10 @@ message ResourceRef {
   optional string name = 5;
 
   optional string uid = 6;
+
+  // Destination is the name of the Application destination this resource belongs to.
+  // Empty means the Application's spec.destination.
+  optional string destination = 7;
 }
 
 // ResourceResult holds the operation result details of a specific resource
@@ -2301,6 +2336,10 @@ message ResourceResult {
 
   // Images contains the images related to the ResourceResult
   repeated string images = 11;
+
+  // Destination is the name of the Application destination this resource was synced to.
+  // Empty means the Application's spec.destination.
+  optional string destination = 12;
 }
 
 // ResourceStatus holds the current synchronization and health status of a Kubernetes resource.
@@ -2338,6 +2377,10 @@ message ResourceStatus {
 
   // RequiresDeletionConfirmation is true if the resource requires explicit user confirmation before deletion.
   optional bool requiresDeletionConfirmation = 11;
+
+  // Destination is the name of the Application destination this resource is deployed to.
+  // Empty means the Application's spec.destination.
+  optional string destination = 12;
 }
 
 // RetryStrategy contains information about the strategy to apply when a sync failed

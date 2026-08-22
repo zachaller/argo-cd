@@ -5530,6 +5530,10 @@
       "description": "ResourceStatus holds the current synchronization and health status of a Kubernetes resource.",
       "type": "object",
       "properties": {
+        "destination": {
+          "description": "Destination is the name of the Application destination this resource is deployed to.\nEmpty means the Application's spec.destination.",
+          "type": "string"
+        },
         "group": {
           "description": "Group represents the API group of the resource (e.g., \"apps\" for Deployments).",
           "type": "string"
@@ -7944,6 +7948,13 @@
         "destination": {
           "$ref": "#/definitions/v1alpha1ApplicationDestination"
         },
+        "destinations": {
+          "description": "Destinations is a list of additional named destinations that individual manifests may target\nusing the argocd.argoproj.io/destination annotation. Manifests without that annotation are\ndeployed to Destination.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/v1alpha1NamedDestination"
+          }
+        },
         "ignoreDifferences": {
           "type": "array",
           "title": "IgnoreDifferences is a list of resources and their fields which should be ignored during comparison",
@@ -8443,6 +8454,13 @@
       "properties": {
         "destination": {
           "$ref": "#/definitions/v1alpha1ApplicationDestination"
+        },
+        "destinations": {
+          "type": "array",
+          "title": "Destinations is a reference to the application's additional named destinations used for comparison",
+          "items": {
+            "$ref": "#/definitions/v1alpha1NamedDestination"
+          }
         },
         "ignoreDifferences": {
           "type": "array",
@@ -9124,6 +9142,28 @@
         },
         "template": {
           "$ref": "#/definitions/v1alpha1ApplicationSetTemplate"
+        }
+      }
+    },
+    "v1alpha1NamedDestination": {
+      "description": "NamedDestination is an additional deployment destination of an Application. Individual manifests\nselect one by name using the argocd.argoproj.io/destination annotation. Manifests without that\nannotation are deployed to the Application's spec.destination.",
+      "type": "object",
+      "properties": {
+        "clusterName": {
+          "description": "ClusterName is an alternate way of specifying the target cluster by its symbolic name. This must be set if Server is not set.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Name uniquely identifies this destination within the Application. It is the value referenced by\nthe argocd.argoproj.io/destination annotation on a manifest. It must not contain '/' or '@'.",
+          "type": "string"
+        },
+        "namespace": {
+          "type": "string",
+          "title": "Namespace specifies the target namespace for resources routed to this destination.\nThe namespace will only be set for namespace-scoped resources that have not set a value for .metadata.namespace"
+        },
+        "server": {
+          "description": "Server specifies the URL of the target cluster's Kubernetes control plane API. This must be set if ClusterName is not set.",
+          "type": "string"
         }
       }
     },
@@ -9966,6 +10006,10 @@
       "description": "ResourceDiff holds the diff between a live and target resource object in Argo CD.\nIt is used to compare the desired state (from Git/Helm) with the actual state in the cluster.",
       "type": "object",
       "properties": {
+        "destination": {
+          "description": "Destination is the name of the Application destination this resource belongs to.\nEmpty means the Application's spec.destination.",
+          "type": "string"
+        },
         "diff": {
           "description": "Diff contains the JSON patch representing the difference between the live and target resource.\n\nDeprecated: Use NormalizedLiveState and PredictedLiveState instead to compute differences.",
           "type": "string"
@@ -10174,6 +10218,10 @@
       "type": "object",
       "title": "ResourceRef includes fields which uniquely identify a resource",
       "properties": {
+        "destination": {
+          "description": "Destination is the name of the Application destination this resource belongs to.\nEmpty means the Application's spec.destination.",
+          "type": "string"
+        },
         "group": {
           "type": "string"
         },
@@ -10198,6 +10246,10 @@
       "type": "object",
       "title": "ResourceResult holds the operation result details of a specific resource",
       "properties": {
+        "destination": {
+          "description": "Destination is the name of the Application destination this resource was synced to.\nEmpty means the Application's spec.destination.",
+          "type": "string"
+        },
         "group": {
           "type": "string",
           "title": "Group specifies the API group of the resource"

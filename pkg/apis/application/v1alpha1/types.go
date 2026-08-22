@@ -79,6 +79,10 @@ type ApplicationSpec struct {
 	Source *ApplicationSource `json:"source,omitempty" protobuf:"bytes,1,opt,name=source"`
 	// Destination is a reference to the target Kubernetes server and namespace
 	Destination ApplicationDestination `json:"destination" protobuf:"bytes,2,name=destination"`
+	// Destinations is a list of additional named destinations that individual manifests may target
+	// using the argocd.argoproj.io/destination annotation. Manifests without that annotation are
+	// deployed to Destination.
+	Destinations []NamedDestination `json:"destinations,omitempty" protobuf:"bytes,10,opt,name=destinations"`
 	// Project is a reference to the project this application belongs to.
 	// The empty string means that application belongs to the 'default' project.
 	Project string `json:"project" protobuf:"bytes,3,name=project"`
@@ -323,6 +327,40 @@ func (spec *ApplicationSpec) GetSourcePtrByIndex(sourceIndex int) *ApplicationSo
 		return &spec.Sources[0]
 	}
 	return spec.Source
+}
+
+// HasMultipleDestinations returns true if the application declares additional named destinations
+// beyond spec.destination.
+func (spec *ApplicationSpec) HasMultipleDestinations() bool {
+	return len(spec.Destinations) > 0
+}
+
+// AllDestinations returns every destination the application may deploy to: the primary
+// spec.destination first (under the empty name), followed by the named destinations in the order
+// they are declared.
+func (spec *ApplicationSpec) AllDestinations() []NamedDestination {
+	dests := make([]NamedDestination, 0, len(spec.Destinations)+1)
+	dests = append(dests, NamedDestination{
+		Server:      spec.Destination.Server,
+		Namespace:   spec.Destination.Namespace,
+		ClusterName: spec.Destination.Name,
+	})
+	dests = append(dests, spec.Destinations...)
+	return dests
+}
+
+// GetDestination returns the destination with the given name. The empty name refers to the primary
+// spec.destination. An error is returned if no destination with that name is declared.
+func (spec *ApplicationSpec) GetDestination(name string) (ApplicationDestination, error) {
+	if name == "" {
+		return spec.Destination, nil
+	}
+	for _, d := range spec.Destinations {
+		if d.Name == name {
+			return d.ToApplicationDestination(), nil
+		}
+	}
+	return ApplicationDestination{}, fmt.Errorf("application does not declare a destination named %q", name)
 }
 
 // AllowsConcurrentProcessing returns true if given application source can be processed concurrently
@@ -1208,6 +1246,32 @@ type ApplicationDestination struct {
 	Name string `json:"name,omitempty" protobuf:"bytes,3,opt,name=name"`
 }
 
+// NamedDestination is an additional deployment destination of an Application. Individual manifests
+// select one by name using the argocd.argoproj.io/destination annotation. Manifests without that
+// annotation are deployed to the Application's spec.destination.
+type NamedDestination struct {
+	// Name uniquely identifies this destination within the Application. It is the value referenced by
+	// the argocd.argoproj.io/destination annotation on a manifest. It must not contain '/' or '@'.
+	Name string `json:"name" protobuf:"bytes,1,name=name"`
+	// Server specifies the URL of the target cluster's Kubernetes control plane API. This must be set if ClusterName is not set.
+	Server string `json:"server,omitempty" protobuf:"bytes,2,opt,name=server"`
+	// Namespace specifies the target namespace for resources routed to this destination.
+	// The namespace will only be set for namespace-scoped resources that have not set a value for .metadata.namespace
+	Namespace string `json:"namespace,omitempty" protobuf:"bytes,3,opt,name=namespace"`
+	// ClusterName is an alternate way of specifying the target cluster by its symbolic name. This must be set if Server is not set.
+	ClusterName string `json:"clusterName,omitempty" protobuf:"bytes,4,opt,name=clusterName"`
+}
+
+// ToApplicationDestination converts the named destination to an ApplicationDestination, which is the
+// form accepted by cluster resolution and AppProject permission checks.
+func (d NamedDestination) ToApplicationDestination() ApplicationDestination {
+	return ApplicationDestination{
+		Server:    d.Server,
+		Namespace: d.Namespace,
+		Name:      d.ClusterName,
+	}
+}
+
 type ResourceHealthLocation string
 
 var (
@@ -1327,6 +1391,7 @@ func (status *ApplicationStatus) GetRevisions() []string {
 func (spec *ApplicationSpec) BuildComparedToStatus(sources []ApplicationSource) ComparedTo {
 	ct := ComparedTo{
 		Destination:       spec.Destination,
+		Destinations:      spec.Destinations,
 		IgnoreDifferences: spec.IgnoreDifferences,
 	}
 	if spec.HasMultipleSources() {
@@ -1800,6 +1865,9 @@ type ResourceResult struct {
 	SyncPhase synccommon.SyncPhase `json:"syncPhase,omitempty" protobuf:"bytes,10,opt,name=syncPhase"`
 	// Images contains the images related to the ResourceResult
 	Images []string `json:"images,omitempty" protobuf:"bytes,11,opt,name=images"`
+	// Destination is the name of the Application destination this resource was synced to.
+	// Empty means the Application's spec.destination.
+	Destination string `json:"destination,omitempty" protobuf:"bytes,12,opt,name=destination"`
 }
 
 // GroupVersionKind returns the GVK schema information for a given resource within a sync result
@@ -1942,6 +2010,8 @@ type ComparedTo struct {
 	Sources ApplicationSources `json:"sources,omitempty" protobuf:"bytes,3,opt,name=sources"`
 	// IgnoreDifferences is a reference to the application's ignored differences used for comparison
 	IgnoreDifferences IgnoreDifferences `json:"ignoreDifferences,omitempty" protobuf:"bytes,4,opt,name=ignoreDifferences"`
+	// Destinations is a reference to the application's additional named destinations used for comparison
+	Destinations []NamedDestination `json:"destinations,omitempty" protobuf:"bytes,5,opt,name=destinations"`
 }
 
 // SyncStatus contains information about the currently observed live and desired states of an application
@@ -2191,6 +2261,9 @@ type ResourceRef struct {
 	Namespace string `json:"namespace,omitempty" protobuf:"bytes,4,opt,name=namespace"`
 	Name      string `json:"name,omitempty" protobuf:"bytes,5,opt,name=name"`
 	UID       string `json:"uid,omitempty" protobuf:"bytes,6,opt,name=uid"`
+	// Destination is the name of the Application destination this resource belongs to.
+	// Empty means the Application's spec.destination.
+	Destination string `json:"destination,omitempty" protobuf:"bytes,7,opt,name=destination"`
 }
 
 // ResourceNode contains information about a live Kubernetes resource and its relationships with other resources.
@@ -2256,6 +2329,9 @@ type ResourceStatus struct {
 	SyncWave int64 `json:"syncWave,omitempty" protobuf:"bytes,10,opt,name=syncWave"`
 	// RequiresDeletionConfirmation is true if the resource requires explicit user confirmation before deletion.
 	RequiresDeletionConfirmation bool `json:"requiresDeletionConfirmation,omitempty" protobuf:"bytes,11,opt,name=requiresDeletionConfirmation"`
+	// Destination is the name of the Application destination this resource is deployed to.
+	// Empty means the Application's spec.destination.
+	Destination string `json:"destination,omitempty" protobuf:"bytes,12,opt,name=destination"`
 }
 
 // GroupVersionKind returns the GVK schema type for given resource status
@@ -2294,6 +2370,9 @@ type ResourceDiff struct {
 	ResourceVersion string `json:"resourceVersion,omitempty" protobuf:"bytes,11,opt,name=resourceVersion"`
 	// Modified indicates whether the live resource has changes compared to the target resource.
 	Modified bool `json:"modified,omitempty" protobuf:"bytes,12,opt,name=modified"`
+	// Destination is the name of the Application destination this resource belongs to.
+	// Empty means the Application's spec.destination.
+	Destination string `json:"destination,omitempty" protobuf:"bytes,13,opt,name=destination"`
 }
 
 // FullName returns full name of a node that was used for diffing in the format "group/kind/namespace/name"

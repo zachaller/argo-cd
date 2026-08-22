@@ -6230,3 +6230,102 @@ func TestGetDrySource_PreservesAllFields(t *testing.T) {
 		})
 	}
 }
+
+func TestNamedDestination_ToApplicationDestination(t *testing.T) {
+	t.Parallel()
+
+	t.Run("server based", func(t *testing.T) {
+		t.Parallel()
+		d := NamedDestination{Name: "prod", Server: "https://prod.example.com", Namespace: "apps"}
+		assert.Equal(t, ApplicationDestination{Server: "https://prod.example.com", Namespace: "apps"}, d.ToApplicationDestination())
+	})
+
+	t.Run("cluster name maps onto the destination name field", func(t *testing.T) {
+		t.Parallel()
+		d := NamedDestination{Name: "prod", ClusterName: "prod-cluster", Namespace: "apps"}
+		assert.Equal(t, ApplicationDestination{Name: "prod-cluster", Namespace: "apps"}, d.ToApplicationDestination())
+	})
+}
+
+func TestApplicationSpec_HasMultipleDestinations(t *testing.T) {
+	t.Parallel()
+
+	spec := ApplicationSpec{Destination: ApplicationDestination{Server: "https://kubernetes.default.svc"}}
+	assert.False(t, spec.HasMultipleDestinations())
+
+	spec.Destinations = []NamedDestination{{Name: "prod", Server: "https://prod.example.com"}}
+	assert.True(t, spec.HasMultipleDestinations())
+}
+
+func TestApplicationSpec_AllDestinations(t *testing.T) {
+	t.Parallel()
+
+	t.Run("primary only", func(t *testing.T) {
+		t.Parallel()
+		spec := ApplicationSpec{Destination: ApplicationDestination{Server: "https://kubernetes.default.svc", Namespace: "default"}}
+		assert.Equal(t, []NamedDestination{
+			{Server: "https://kubernetes.default.svc", Namespace: "default"},
+		}, spec.AllDestinations())
+	})
+
+	t.Run("primary first, then named in declaration order", func(t *testing.T) {
+		t.Parallel()
+		spec := ApplicationSpec{
+			Destination: ApplicationDestination{Name: "in-cluster", Namespace: "default"},
+			Destinations: []NamedDestination{
+				{Name: "prod", Server: "https://prod.example.com", Namespace: "apps"},
+				{Name: "shared", ClusterName: "shared-cluster", Namespace: "infra"},
+			},
+		}
+		assert.Equal(t, []NamedDestination{
+			{ClusterName: "in-cluster", Namespace: "default"},
+			{Name: "prod", Server: "https://prod.example.com", Namespace: "apps"},
+			{Name: "shared", ClusterName: "shared-cluster", Namespace: "infra"},
+		}, spec.AllDestinations())
+	})
+}
+
+func TestApplicationSpec_GetDestination(t *testing.T) {
+	t.Parallel()
+
+	spec := ApplicationSpec{
+		Destination: ApplicationDestination{Server: "https://kubernetes.default.svc", Namespace: "default"},
+		Destinations: []NamedDestination{
+			{Name: "prod", Server: "https://prod.example.com", Namespace: "apps"},
+		},
+	}
+
+	t.Run("empty name returns the primary destination", func(t *testing.T) {
+		t.Parallel()
+		dest, err := spec.GetDestination("")
+		require.NoError(t, err)
+		assert.Equal(t, spec.Destination, dest)
+	})
+
+	t.Run("named destination", func(t *testing.T) {
+		t.Parallel()
+		dest, err := spec.GetDestination("prod")
+		require.NoError(t, err)
+		assert.Equal(t, ApplicationDestination{Server: "https://prod.example.com", Namespace: "apps"}, dest)
+	})
+
+	t.Run("unknown name is an error, never a fallback to the primary", func(t *testing.T) {
+		t.Parallel()
+		_, err := spec.GetDestination("staging")
+		require.ErrorContains(t, err, "staging")
+	})
+}
+
+func TestApplicationSpec_BuildComparedToStatus_CarriesDestinations(t *testing.T) {
+	t.Parallel()
+
+	// ComparedTo must carry the named destinations, otherwise editing spec.destinations
+	// would not trigger a refresh.
+	spec := ApplicationSpec{
+		Destination:  ApplicationDestination{Server: "https://kubernetes.default.svc"},
+		Destinations: []NamedDestination{{Name: "prod", Server: "https://prod.example.com"}},
+	}
+	ct := spec.BuildComparedToStatus([]ApplicationSource{{RepoURL: "https://github.com/argoproj/test.git"}})
+	assert.Equal(t, spec.Destinations, ct.Destinations)
+	assert.Equal(t, spec.Destination, ct.Destination)
+}
