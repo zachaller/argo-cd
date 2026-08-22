@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -313,6 +314,11 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 		mergedMessages []string
 	)
 
+	// The phase and message the operation entered this pass with. Every destination starts from
+	// these; syncDestination writes its result back into the operation, so reading them there would
+	// hand each destination the phase the previous one happened to end on.
+	entryPhase, entryMessage := state.Phase, state.Message
+
 	// Sync waves have to hold across destinations, not just within one: a resource in wave 1 of one
 	// cluster must not apply before wave 0 has finished in every cluster. Each destination is
 	// therefore held at a shared frontier and only allowed to work at or before it.
@@ -331,15 +337,22 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 	// true the frontier stays put; once no destination does, every one of them has finished it.
 	frontierHasPendingWork := false
 
-	for _, destName := range compareResult.destOrder {
-		dest, ok := compareResult.resolvedDests[destName]
-		if !ok {
-			continue
-		}
-		dc, ok := compareResult.perDestination[destName]
-		if !ok {
-			continue
-		}
+	// Each destination's result this pass is kept rather than merged straight away, because a
+	// destination may have to be run a second time -- with its SyncFail hooks forced -- once some
+	// other destination has failed.
+	type destinationOutcome struct {
+		phase   common.OperationPhase
+		message string
+		sync    destinationSyncOutcome
+	}
+	outcomes := make(map[string]destinationOutcome, len(compareResult.destOrder))
+
+	// runDestination syncs one destination and records what it produced. A non-empty
+	// forceSyncFailReason makes it apply nothing and run its SyncFail hooks instead. It reports
+	// false when syncDestination has already recorded a terminal state and the caller must stop.
+	runDestination := func(destName, forceSyncFailReason string, initial []common.ResourceSyncResult) bool {
+		dest := compareResult.resolvedDests[destName]
+		dc := compareResult.perDestination[destName]
 
 		ss := syncSettings{
 			resourceOverrides:      resourceOverrides,
@@ -347,9 +360,14 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 			clientSideApplyManager: clientSideApplyManager,
 			installationID:         installationID,
 			trackingMethod:         trackingMethod,
-			initialResourcesRes:    initialByDest[destName],
+			initialResourcesRes:    initial,
+			initialPhase:           entryPhase,
+			initialMessage:         entryMessage,
+			forceSyncFailReason:    forceSyncFailReason,
 		}
-		if haveFrontier {
+		// A forced destination applies nothing, so it has no work for the frontier to hold back,
+		// and counting it as pending would stall every destination behind it.
+		if haveFrontier && forceSyncFailReason == "" {
 			ss.syncTaskFilter = func(phase common.SyncPhase, wave int) bool {
 				// SyncFail runs only when something has already failed; holding it back would
 				// prevent cleanup rather than order it.
@@ -368,22 +386,79 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 		outcome, ok := m.syncDestination(ctx, app, project, state, compareResult, dest, dc, syncOp, ss, logEntry)
 		if !ok {
 			// syncDestination has already recorded a terminal state on the operation.
-			return
+			return false
 		}
 		logEntry = outcome.logEntry
-		destCluster := outcome.cluster
+		outcomes[destName] = destinationOutcome{phase: state.Phase, message: state.Message, sync: outcome}
+		return true
+	}
 
-		mergedPhase = mergeOperationPhase(mergedPhase, state.Phase)
-		if state.Message != "" {
-			if len(compareResult.destOrder) > 1 && destName != argo.PrimaryDestinationName {
-				mergedMessages = append(mergedMessages, fmt.Sprintf("[%s] %s", destName, state.Message))
+	multiDest := len(compareResult.destOrder) > 1
+	// Set once some destination has failed. Passed to the destinations that have SyncFail hooks of
+	// their own, so that those hooks run even though nothing in that destination failed. Only the
+	// first failure is reported: it is the one that caused the rest.
+	forceReason := ""
+	forced := map[string]bool{}
+
+	for _, destName := range compareResult.destOrder {
+		if _, ok := compareResult.resolvedDests[destName]; !ok {
+			continue
+		}
+		dc, ok := compareResult.perDestination[destName]
+		if !ok {
+			continue
+		}
+		// Only a destination with SyncFail hooks has anything to gain from being forced. Forcing
+		// one without them would report it as failed when it in fact applied cleanly.
+		reason := ""
+		if forceReason != "" && hasSyncFailHooks(dc) {
+			reason = forceReason
+			forced[destName] = true
+		}
+		if !runDestination(destName, reason, initialByDest[destName]) {
+			return
+		}
+		if multiDest && forceReason == "" && destinationFailed(outcomes[destName].phase) {
+			forceReason = forcedSyncFailReason(destName)
+		}
+	}
+
+	// A destination that fails late leaves the ones before it already applied, with no failure of
+	// their own for the engine to trigger their SyncFail hooks on. Run those again with the failure
+	// forced, seeded with what they just did so that nothing is applied twice.
+	if forceReason != "" {
+		for _, destName := range compareResult.destOrder {
+			o, ok := outcomes[destName]
+			if !ok || forced[destName] || destinationFailed(o.phase) {
+				continue
+			}
+			if !hasSyncFailHooks(compareResult.perDestination[destName]) {
+				continue
+			}
+			if !runDestination(destName, forceReason, o.sync.resources) {
+				return
+			}
+		}
+	}
+
+	for _, destName := range compareResult.destOrder {
+		o, ok := outcomes[destName]
+		if !ok {
+			continue
+		}
+		destCluster := o.sync.cluster
+
+		mergedPhase = mergeOperationPhase(mergedPhase, o.phase)
+		if o.message != "" {
+			if multiDest && destName != argo.PrimaryDestinationName {
+				mergedMessages = append(mergedMessages, fmt.Sprintf("[%s] %s", destName, o.message))
 			} else {
-				mergedMessages = append(mergedMessages, state.Message)
+				mergedMessages = append(mergedMessages, o.message)
 			}
 		}
 
 		var apiVersion []kube.APIResourceInfo
-		for _, res := range outcome.resources {
+		for _, res := range o.sync.resources {
 			augmentedMsg, err := argo.AugmentSyncMsg(res, func() ([]kube.APIResourceInfo, error) {
 				if apiVersion == nil {
 					_, apiVersion, err = m.liveStateCache.GetVersionsInfo(destCluster)
@@ -476,10 +551,55 @@ func operationPhaseRank(p common.OperationPhase) int {
 // mergeOperationPhase combines one destination's phase into the operation's overall phase, keeping
 // the least successful of the two. An application is only Succeeded when every destination is.
 func mergeOperationPhase(a, b common.OperationPhase) common.OperationPhase {
+	if a == "" {
+		return b
+	}
+	// A destination that has not finished keeps the whole operation unfinished, even when another
+	// has already failed. A terminal phase says nothing about a destination that is still working,
+	// and reporting the operation terminal would abandon that work -- including the SyncFail hooks
+	// it has already started. The failed destination stays failed on the next pass, so the
+	// operation still ends up failed once every destination has settled.
+	if a.Completed() != b.Completed() {
+		if a.Completed() {
+			return b
+		}
+		return a
+	}
 	if operationPhaseRank(b) > operationPhaseRank(a) {
 		return b
 	}
 	return a
+}
+
+// destinationFailed reports whether a destination has finished and did not succeed.
+func destinationFailed(phase common.OperationPhase) bool {
+	return phase.Completed() && !phase.Successful()
+}
+
+// forcedSyncFailReason is the failure message given to the destinations that have to run their
+// SyncFail hooks because a different destination failed.
+func forcedSyncFailReason(destName string) string {
+	if destName == argo.PrimaryDestinationName {
+		return "the primary destination failed to sync"
+	}
+	return fmt.Sprintf("destination %q failed to sync", destName)
+}
+
+// hasSyncFailHooks reports whether a destination has any SyncFail hook. Only such a destination has
+// anything to gain from having another destination's failure forced onto it.
+func hasSyncFailHooks(dc *destinationComparison) bool {
+	if dc == nil {
+		return false
+	}
+	for _, obj := range dc.reconciliationResult.Hooks {
+		if obj == nil {
+			continue
+		}
+		if slices.Contains(sync.SyncPhases(obj), common.SyncPhaseSyncFail) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeTargetResources(openAPISchema openapi.Resources, cr *destinationComparison) ([]*unstructured.Unstructured, error) {
@@ -770,6 +890,15 @@ type syncSettings struct {
 	installationID         string
 	trackingMethod         string
 	initialResourcesRes    []common.ResourceSyncResult
+	// initialPhase and initialMessage are the operation's state on entry to this pass. They are
+	// carried explicitly because every destination's sync context has to start from the same
+	// state: syncDestination writes its result back into the operation, so reading it there would
+	// hand each destination the phase the previous one happened to end on.
+	initialPhase   common.OperationPhase
+	initialMessage string
+	// forceSyncFailReason, when set, makes this destination apply nothing and run its SyncFail
+	// hooks instead, failing with this reason. It is set when a different destination has failed.
+	forceSyncFailReason string
 	// syncTaskFilter, when set, holds back tasks beyond the shared wave frontier. It is nil for a
 	// single-destination application, which needs no coordination.
 	syncTaskFilter func(phase common.SyncPhase, wave int) bool
@@ -907,7 +1036,7 @@ func (m *appStateManager) syncDestination(
 			}, un, res)
 		}),
 		sync.WithOperationSettings(syncOp.DryRun, syncOp.Prune, syncOp.SyncStrategy.Force(), syncOp.IsApplyStrategy() || len(syncOp.Resources) > 0),
-		sync.WithInitialState(state.Phase, state.Message, initialResourcesRes, state.StartedAt),
+		sync.WithInitialState(ss.initialPhase, ss.initialMessage, initialResourcesRes, state.StartedAt),
 		sync.WithResourcesFilter(func(key kube.ResourceKey, target *unstructured.Unstructured, live *unstructured.Unstructured) bool {
 			return (len(syncOp.Resources) == 0 ||
 				isPostDeleteHook(target) ||
@@ -936,6 +1065,10 @@ func (m *appStateManager) syncDestination(
 		opts = append(opts, sync.WithSyncTaskFilter(ss.syncTaskFilter))
 	}
 
+	if ss.forceSyncFailReason != "" {
+		opts = append(opts, sync.WithForceSyncFailPhase(ss.forceSyncFailReason))
+	}
+
 	if syncOp.SyncOptions.HasOption("CreateNamespace=true") {
 		opts = append(opts, sync.WithNamespaceModifier(syncNamespace(app.Spec.SyncPolicy)))
 	}
@@ -957,7 +1090,7 @@ func (m *appStateManager) syncDestination(
 
 	defer cleanup()
 
-	if state.Phase == common.OperationTerminating {
+	if ss.initialPhase == common.OperationTerminating {
 		syncCtx.Terminate(ctx)
 	} else {
 		syncCtx.Sync(ctx)

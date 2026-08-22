@@ -67,6 +67,26 @@ A manifest with no annotation is deployed to `spec.destination`.
 > `spec.destination` instead: deploying a resource to the wrong cluster is worse than not deploying
 > it.
 
+## Sync waves and hooks
+
+Sync waves order across destinations, not just within one. Every destination is held at a shared
+frontier, so wave 1 does not start in any cluster until wave 0 has finished in all of them. Phases
+order first and waves within a phase, exactly as they do for a single-destination Application.
+
+Prune and prune-last operations are the exception. Argo CD rewrites their waves internally, so they
+order within a destination but not across them.
+
+If any destination fails, the Application's sync fails, and every destination that has `SyncFail`
+hooks runs them — not just the one that failed. Without this a hook meant to clean up after a failed
+release would never fire in the clusters that had already applied successfully.
+
+A destination with no `SyncFail` hooks is left alone: it keeps whatever result it reached, so a
+destination that applied cleanly is not reported as failed.
+
+> [!NOTE]
+> A destination that has not yet finished keeps the whole operation `Running`, even after another
+> destination has failed. The operation reports `Failed` once every destination has settled.
+
 ## Project permissions
 
 Every destination an Application uses must be permitted by its `AppProject`, not just

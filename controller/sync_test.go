@@ -2452,10 +2452,17 @@ func TestMergeOperationPhase(t *testing.T) {
 		mergeOperationPhase(synccommon.OperationSucceeded, synccommon.OperationError))
 	assert.Equal(t, synccommon.OperationError,
 		mergeOperationPhase(synccommon.OperationFailed, synccommon.OperationError))
-	assert.Equal(t, synccommon.OperationFailed,
-		mergeOperationPhase(synccommon.OperationRunning, synccommon.OperationFailed))
 	assert.Equal(t, synccommon.OperationRunning,
 		mergeOperationPhase(synccommon.OperationSucceeded, synccommon.OperationRunning))
+
+	// A destination that has not finished outranks one that has, even a failed one. Reporting the
+	// operation terminal here would abandon the unfinished destination's work -- including SyncFail
+	// hooks it has started because of that very failure. The failed destination stays failed on the
+	// next pass, so the operation still ends up failed once every destination has settled.
+	assert.Equal(t, synccommon.OperationRunning,
+		mergeOperationPhase(synccommon.OperationRunning, synccommon.OperationFailed))
+	assert.Equal(t, synccommon.OperationRunning,
+		mergeOperationPhase(synccommon.OperationError, synccommon.OperationRunning))
 
 	// Succeeded only survives when every destination succeeded.
 	assert.Equal(t, synccommon.OperationSucceeded,
@@ -2580,4 +2587,51 @@ func TestDestinationStepsIncludesHookPhases(t *testing.T) {
 	for step := range steps {
 		assert.NotEqual(t, synccommon.SyncPhaseSyncFail, step.phase)
 	}
+}
+
+func TestForcedSyncFailReason(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, `destination "prod" failed to sync`, forcedSyncFailReason("prod"))
+	// The primary destination has no name to quote.
+	assert.Equal(t, "the primary destination failed to sync", forcedSyncFailReason(argo.PrimaryDestinationName))
+}
+
+func TestHasSyncFailHooks(t *testing.T) {
+	t.Parallel()
+
+	hook := func(hookType synccommon.HookType) *unstructured.Unstructured {
+		u := kube.MustToUnstructured(&corev1.Pod{
+			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+			ObjectMeta: metav1.ObjectMeta{Name: "hook"},
+		})
+		u.SetAnnotations(map[string]string{synccommon.AnnotationKeyHook: string(hookType)})
+		return u
+	}
+
+	withHooks := func(hooks ...*unstructured.Unstructured) *destinationComparison {
+		return &destinationComparison{reconciliationResult: sync.ReconciliationResult{Hooks: hooks}}
+	}
+
+	assert.True(t, hasSyncFailHooks(withHooks(hook(synccommon.HookTypeSyncFail))))
+	assert.True(t, hasSyncFailHooks(withHooks(hook(synccommon.HookTypePreSync), hook(synccommon.HookTypeSyncFail))))
+
+	// Only SyncFail counts: forcing a destination whose hooks all run on the happy path would
+	// report it as failed when it in fact applied cleanly.
+	assert.False(t, hasSyncFailHooks(withHooks(hook(synccommon.HookTypePreSync))))
+	assert.False(t, hasSyncFailHooks(withHooks()))
+	assert.False(t, hasSyncFailHooks(withHooks(nil)))
+	assert.False(t, hasSyncFailHooks(nil))
+}
+
+func TestDestinationFailed(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, destinationFailed(synccommon.OperationFailed))
+	assert.True(t, destinationFailed(synccommon.OperationError))
+
+	// A destination that is still working has not failed, however badly it may end up.
+	assert.False(t, destinationFailed(synccommon.OperationRunning))
+	assert.False(t, destinationFailed(synccommon.OperationTerminating))
+	assert.False(t, destinationFailed(synccommon.OperationSucceeded))
 }
