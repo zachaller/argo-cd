@@ -288,157 +288,21 @@ func (m *appStateManager) SyncAppState(ctx context.Context, app *v1alpha1.Applic
 		return
 	}
 
-	destCluster, err := argo.GetDestinationCluster(ctx, app.Spec.Destination, m.db)
-	if err != nil {
-		state.Phase = common.OperationError
-		state.Message = fmt.Sprintf("Failed to get destination cluster: %v", err)
-		return
-	}
-
-	rawConfig, err := destCluster.RawRestConfig()
-	if err != nil {
-		state.Phase = common.OperationError
-		state.Message = err.Error()
-		return
-	}
-
-	clusterRESTConfig, err := destCluster.RESTConfig()
-	if err != nil {
-		state.Phase = common.OperationError
-		state.Message = err.Error()
-		return
-	}
-	restConfig := metrics.AddMetricsTransportWrapper(m.metricsServer, app, clusterRESTConfig)
-
-	reconciliationResult := compareResult.reconciliationResult
-
-	// if RespectIgnoreDifferences is enabled, it should normalize the target
-	// resources which in this case applies the live values in the configured
-	// ignore differences fields.
-	if syncOp.SyncOptions.HasOption("RespectIgnoreDifferences=true") {
-		openAPISchema, err := m.getOpenAPISchema(destCluster)
-		if err != nil {
-			state.Phase = common.OperationError
-			state.Message = fmt.Sprintf("failed to load openAPISchema: %v", err)
-			return
-		}
-
-		patchedTargets, err := normalizeTargetResources(openAPISchema, compareResult)
-		if err != nil {
-			state.Phase = common.OperationError
-			state.Message = fmt.Sprintf("Failed to normalize target resources: %s", err)
-			return
-		}
-		reconciliationResult.Target = patchedTargets
-	}
-
-	impersonationEnabled, err := m.settingsMgr.IsImpersonationEnabled()
-	if err != nil {
-		log.Errorf("could not get impersonation feature flag: %v", err)
-		return
-	}
-	if impersonationEnabled {
-		serviceAccountToImpersonate, err := settings.DeriveServiceAccountToImpersonate(project, app, destCluster, app.Spec.Destination.Namespace)
-		if err != nil {
-			state.Phase = common.OperationError
-			state.Message = fmt.Sprintf("failed to derive service account to impersonate: %v", err)
-			return
-		}
-
-		if serviceAccountToImpersonate == "" {
-			// No matching service account found - check enforcement
-			impersonationEnforced, enforcedErr := m.settingsMgr.IsImpersonationEnforced()
-			if enforcedErr != nil {
-				log.Errorf("could not get impersonation enforcement flag: %v", enforcedErr)
-				state.Phase = common.OperationError
-				state.Message = fmt.Sprintf("failed to check impersonation enforcement setting: %v", enforcedErr)
-				return
-			}
-
-			if impersonationEnforced {
-				state.Phase = common.OperationError
-				state.Message = fmt.Sprintf("no matching service account found for destination server %s and namespace %s", destCluster.Server, app.Spec.Destination.Namespace)
-				return
-			}
-
-			// Non-enforced mode: log info and continue with controller SA
-			logEntry.Infof("no matching service account found for impersonation (project: %s, server: %s, namespace: %s), falling back to controller service account", project.Name, destCluster.Server, app.Spec.Destination.Namespace)
-		} else {
-			logEntry = logEntry.WithFields(log.Fields{"impersonationEnabled": "true", "serviceAccount": serviceAccountToImpersonate})
-			// set the impersonation headers.
-			rawConfig.Impersonate = rest.ImpersonationConfig{
-				UserName: serviceAccountToImpersonate,
-			}
-			restConfig.Impersonate = rest.ImpersonationConfig{
-				UserName: serviceAccountToImpersonate,
-			}
-		}
-	}
-
-	opts := []sync.SyncOpt{
-		sync.WithLogr(logutils.NewLogrusLogger(logEntry)),
-		sync.WithHealthOverride(lua.ResourceHealthOverrides(resourceOverrides)),
-		sync.WithPermissionValidator(func(un *unstructured.Unstructured, res *metav1.APIResource) error {
-			return validateSyncPermissions(project, destCluster, func(proj string) ([]*v1alpha1.Cluster, error) {
-				return m.db.GetProjectClusters(ctx, proj)
-			}, un, res)
-		}),
-		sync.WithOperationSettings(syncOp.DryRun, syncOp.Prune, syncOp.SyncStrategy.Force(), syncOp.IsApplyStrategy() || len(syncOp.Resources) > 0),
-		sync.WithInitialState(state.Phase, state.Message, initialResourcesRes, state.StartedAt),
-		sync.WithResourcesFilter(func(key kube.ResourceKey, target *unstructured.Unstructured, live *unstructured.Unstructured) bool {
-			return (len(syncOp.Resources) == 0 ||
-				isPostDeleteHook(target) ||
-				isPreDeleteHook(target) ||
-				argo.ContainsSyncResource(key.Name, key.Namespace, schema.GroupVersionKind{Kind: key.Kind, Group: key.Group}, syncOp.Resources)) &&
-				m.isSelfReferencedObj(live, target, app.GetName(), v1alpha1.TrackingMethod(trackingMethod), installationID)
-		}),
-		sync.WithManifestValidation(!syncOp.SyncOptions.HasOption(common.SyncOptionsDisableValidation)),
-		sync.WithSyncWaveHook(delayBetweenSyncWaves),
-		sync.WithPruneLast(syncOp.SyncOptions.HasOption(common.SyncOptionPruneLast)),
-		sync.WithResourceModificationChecker(syncOp.SyncOptions.HasOption("ApplyOutOfSyncOnly=true"), compareResult.diffResultList),
-		sync.WithPrunePropagationPolicy(&prunePropagationPolicy),
-		sync.WithReplace(syncOp.SyncOptions.HasOption(common.SyncOptionReplace)),
-		sync.WithServerSideApply(syncOp.SyncOptions.HasOption(common.SyncOptionServerSideApply)),
-		sync.WithServerSideApplyManager(cdcommon.ArgoCDSSAManager),
-		sync.WithClientSideApplyMigration(
-			!syncOp.SyncOptions.HasOption(common.SyncOptionDisableClientSideApplyMigration),
-			clientSideApplyManager,
-		),
-		sync.WithPruneConfirmed(app.IsDeletionConfirmed(state.StartedAt.Time)),
-		sync.WithDefaultPruneOption(syncOp.SyncOptions.GetOptionValue(common.SyncOptionPrune)),
-		sync.WithSkipDryRunOnMissingResource(syncOp.SyncOptions.HasOption(common.SyncOptionSkipDryRunOnMissingResource)),
-	}
-
-	if syncOp.SyncOptions.HasOption("CreateNamespace=true") {
-		opts = append(opts, sync.WithNamespaceModifier(syncNamespace(app.Spec.SyncPolicy)))
-	}
-
-	syncCtx, cleanup, err := sync.NewSyncContext(
-		compareResult.syncStatus.Revision,
-		reconciliationResult,
-		restConfig,
-		rawConfig,
-		m.kubectl,
-		app.Spec.Destination.Namespace,
-		opts...,
-	)
-	if err != nil {
-		state.Phase = common.OperationError
-		state.Message = fmt.Sprintf("failed to initialize sync context: %v", err)
-		return
-	}
-
-	defer cleanup()
-
 	start := time.Now()
 
-	if state.Phase == common.OperationTerminating {
-		syncCtx.Terminate(ctx)
-	} else {
-		syncCtx.Sync(ctx)
+	outcome, ok := m.syncDestination(ctx, app, project, state, compareResult, syncOp, syncSettings{
+		resourceOverrides:      resourceOverrides,
+		prunePropagationPolicy: prunePropagationPolicy,
+		clientSideApplyManager: clientSideApplyManager,
+		installationID:         installationID,
+		trackingMethod:         trackingMethod,
+		initialResourcesRes:    initialResourcesRes,
+	}, logEntry)
+	if !ok {
+		return
 	}
-	var resState []common.ResourceSyncResult
-	state.Phase, state.Message, resState = syncCtx.GetState()
+	resState, destCluster, logEntry := outcome.resources, outcome.cluster, outcome.logEntry
+
 	state.SyncResult.Resources = nil
 
 	if app.Spec.SyncPolicy != nil {
@@ -771,4 +635,202 @@ func validateSyncPermissions(
 		}
 	}
 	return nil
+}
+
+// syncSettings carries the application-level inputs shared by every destination's sync context.
+type syncSettings struct {
+	resourceOverrides      map[string]v1alpha1.ResourceOverride
+	prunePropagationPolicy metav1.DeletionPropagation
+	clientSideApplyManager string
+	installationID         string
+	trackingMethod         string
+	initialResourcesRes    []common.ResourceSyncResult
+}
+
+// destinationSyncOutcome is what one destination's sync pass produced.
+type destinationSyncOutcome struct {
+	resources []common.ResourceSyncResult
+	// cluster is the resolved destination cluster, needed to augment sync messages afterwards.
+	cluster *v1alpha1.Cluster
+	// logEntry may carry impersonation fields added while building the context.
+	logEntry *log.Entry
+}
+
+// syncDestination builds a sync context for one destination and runs a single pass against it.
+//
+// Everything here is destination-specific: the REST configs, the service account impersonated, the
+// permission validator, the default namespace and the resources the engine may touch. Gathering
+// them behind one call is what will let an application sync to more than one cluster.
+//
+// It reports false when it has already recorded a terminal state on the operation and the caller
+// should stop. The returned log entry may carry impersonation fields added while building the
+// context.
+func (m *appStateManager) syncDestination(
+	ctx context.Context,
+	app *v1alpha1.Application,
+	project *v1alpha1.AppProject,
+	state *v1alpha1.OperationState,
+	compareResult *comparisonResult,
+	syncOp v1alpha1.SyncOperation,
+	ss syncSettings,
+	logEntry *log.Entry,
+) (destinationSyncOutcome, bool) {
+	resourceOverrides := ss.resourceOverrides
+	prunePropagationPolicy := ss.prunePropagationPolicy
+	clientSideApplyManager := ss.clientSideApplyManager
+	installationID := ss.installationID
+	trackingMethod := ss.trackingMethod
+	initialResourcesRes := ss.initialResourcesRes
+
+	destCluster, err := argo.GetDestinationCluster(ctx, app.Spec.Destination, m.db)
+	if err != nil {
+		state.Phase = common.OperationError
+		state.Message = fmt.Sprintf("Failed to get destination cluster: %v", err)
+		return destinationSyncOutcome{}, false
+	}
+
+	rawConfig, err := destCluster.RawRestConfig()
+	if err != nil {
+		state.Phase = common.OperationError
+		state.Message = err.Error()
+		return destinationSyncOutcome{}, false
+	}
+
+	clusterRESTConfig, err := destCluster.RESTConfig()
+	if err != nil {
+		state.Phase = common.OperationError
+		state.Message = err.Error()
+		return destinationSyncOutcome{}, false
+	}
+	restConfig := metrics.AddMetricsTransportWrapper(m.metricsServer, app, clusterRESTConfig)
+
+	reconciliationResult := compareResult.reconciliationResult
+
+	// if RespectIgnoreDifferences is enabled, it should normalize the target
+	// resources which in this case applies the live values in the configured
+	// ignore differences fields.
+	if syncOp.SyncOptions.HasOption("RespectIgnoreDifferences=true") {
+		openAPISchema, err := m.getOpenAPISchema(destCluster)
+		if err != nil {
+			state.Phase = common.OperationError
+			state.Message = fmt.Sprintf("failed to load openAPISchema: %v", err)
+			return destinationSyncOutcome{}, false
+		}
+
+		patchedTargets, err := normalizeTargetResources(openAPISchema, compareResult)
+		if err != nil {
+			state.Phase = common.OperationError
+			state.Message = fmt.Sprintf("Failed to normalize target resources: %s", err)
+			return destinationSyncOutcome{}, false
+		}
+		reconciliationResult.Target = patchedTargets
+	}
+
+	impersonationEnabled, err := m.settingsMgr.IsImpersonationEnabled()
+	if err != nil {
+		log.Errorf("could not get impersonation feature flag: %v", err)
+		return destinationSyncOutcome{}, false
+	}
+	if impersonationEnabled {
+		serviceAccountToImpersonate, err := settings.DeriveServiceAccountToImpersonate(project, app, destCluster, app.Spec.Destination.Namespace)
+		if err != nil {
+			state.Phase = common.OperationError
+			state.Message = fmt.Sprintf("failed to derive service account to impersonate: %v", err)
+			return destinationSyncOutcome{}, false
+		}
+
+		if serviceAccountToImpersonate == "" {
+			// No matching service account found - check enforcement
+			impersonationEnforced, enforcedErr := m.settingsMgr.IsImpersonationEnforced()
+			if enforcedErr != nil {
+				log.Errorf("could not get impersonation enforcement flag: %v", enforcedErr)
+				state.Phase = common.OperationError
+				state.Message = fmt.Sprintf("failed to check impersonation enforcement setting: %v", enforcedErr)
+				return destinationSyncOutcome{}, false
+			}
+
+			if impersonationEnforced {
+				state.Phase = common.OperationError
+				state.Message = fmt.Sprintf("no matching service account found for destination server %s and namespace %s", destCluster.Server, app.Spec.Destination.Namespace)
+				return destinationSyncOutcome{}, false
+			}
+
+			// Non-enforced mode: log info and continue with controller SA
+			logEntry.Infof("no matching service account found for impersonation (project: %s, server: %s, namespace: %s), falling back to controller service account", project.Name, destCluster.Server, app.Spec.Destination.Namespace)
+		} else {
+			logEntry = logEntry.WithFields(log.Fields{"impersonationEnabled": "true", "serviceAccount": serviceAccountToImpersonate})
+			// set the impersonation headers.
+			rawConfig.Impersonate = rest.ImpersonationConfig{
+				UserName: serviceAccountToImpersonate,
+			}
+			restConfig.Impersonate = rest.ImpersonationConfig{
+				UserName: serviceAccountToImpersonate,
+			}
+		}
+	}
+
+	opts := []sync.SyncOpt{
+		sync.WithLogr(logutils.NewLogrusLogger(logEntry)),
+		sync.WithHealthOverride(lua.ResourceHealthOverrides(resourceOverrides)),
+		sync.WithPermissionValidator(func(un *unstructured.Unstructured, res *metav1.APIResource) error {
+			return validateSyncPermissions(project, destCluster, func(proj string) ([]*v1alpha1.Cluster, error) {
+				return m.db.GetProjectClusters(ctx, proj)
+			}, un, res)
+		}),
+		sync.WithOperationSettings(syncOp.DryRun, syncOp.Prune, syncOp.SyncStrategy.Force(), syncOp.IsApplyStrategy() || len(syncOp.Resources) > 0),
+		sync.WithInitialState(state.Phase, state.Message, initialResourcesRes, state.StartedAt),
+		sync.WithResourcesFilter(func(key kube.ResourceKey, target *unstructured.Unstructured, live *unstructured.Unstructured) bool {
+			return (len(syncOp.Resources) == 0 ||
+				isPostDeleteHook(target) ||
+				isPreDeleteHook(target) ||
+				argo.ContainsSyncResource(key.Name, key.Namespace, schema.GroupVersionKind{Kind: key.Kind, Group: key.Group}, syncOp.Resources)) &&
+				m.isSelfReferencedObj(live, target, app.GetName(), v1alpha1.TrackingMethod(trackingMethod), installationID)
+		}),
+		sync.WithManifestValidation(!syncOp.SyncOptions.HasOption(common.SyncOptionsDisableValidation)),
+		sync.WithSyncWaveHook(delayBetweenSyncWaves),
+		sync.WithPruneLast(syncOp.SyncOptions.HasOption(common.SyncOptionPruneLast)),
+		sync.WithResourceModificationChecker(syncOp.SyncOptions.HasOption("ApplyOutOfSyncOnly=true"), compareResult.diffResultList),
+		sync.WithPrunePropagationPolicy(&prunePropagationPolicy),
+		sync.WithReplace(syncOp.SyncOptions.HasOption(common.SyncOptionReplace)),
+		sync.WithServerSideApply(syncOp.SyncOptions.HasOption(common.SyncOptionServerSideApply)),
+		sync.WithServerSideApplyManager(cdcommon.ArgoCDSSAManager),
+		sync.WithClientSideApplyMigration(
+			!syncOp.SyncOptions.HasOption(common.SyncOptionDisableClientSideApplyMigration),
+			clientSideApplyManager,
+		),
+		sync.WithPruneConfirmed(app.IsDeletionConfirmed(state.StartedAt.Time)),
+		sync.WithDefaultPruneOption(syncOp.SyncOptions.GetOptionValue(common.SyncOptionPrune)),
+		sync.WithSkipDryRunOnMissingResource(syncOp.SyncOptions.HasOption(common.SyncOptionSkipDryRunOnMissingResource)),
+	}
+
+	if syncOp.SyncOptions.HasOption("CreateNamespace=true") {
+		opts = append(opts, sync.WithNamespaceModifier(syncNamespace(app.Spec.SyncPolicy)))
+	}
+
+	syncCtx, cleanup, err := sync.NewSyncContext(
+		compareResult.syncStatus.Revision,
+		reconciliationResult,
+		restConfig,
+		rawConfig,
+		m.kubectl,
+		app.Spec.Destination.Namespace,
+		opts...,
+	)
+	if err != nil {
+		state.Phase = common.OperationError
+		state.Message = fmt.Sprintf("failed to initialize sync context: %v", err)
+		return destinationSyncOutcome{}, false
+	}
+
+	defer cleanup()
+
+	if state.Phase == common.OperationTerminating {
+		syncCtx.Terminate(ctx)
+	} else {
+		syncCtx.Sync(ctx)
+	}
+	var resState []common.ResourceSyncResult
+	state.Phase, state.Message, resState = syncCtx.GetState()
+
+	return destinationSyncOutcome{resources: resState, cluster: destCluster, logEntry: logEntry}, true
 }
