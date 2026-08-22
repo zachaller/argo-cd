@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/argoproj/argo-cd/v3/common"
+	mockstatecache "github.com/argoproj/argo-cd/v3/controller/cache/mocks"
 	"github.com/argoproj/argo-cd/v3/controller/testdata"
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v3/reposerver/apiclient"
@@ -2907,4 +2908,58 @@ func singleDest(c *v1alpha1.Cluster) map[string]argo.ResolvedDestination {
 	return map[string]argo.ResolvedDestination{
 		argo.PrimaryDestinationName: {Name: argo.PrimaryDestinationName, Cluster: c},
 	}
+}
+
+func TestWarnOnDivergentCapabilities(t *testing.T) {
+	t.Parallel()
+
+	primaryCluster := &v1alpha1.Cluster{Server: "https://primary"}
+	otherCluster := &v1alpha1.Cluster{Server: "https://other"}
+
+	resolved := map[string]argo.ResolvedDestination{
+		argo.PrimaryDestinationName: {Name: argo.PrimaryDestinationName, Cluster: primaryCluster},
+		"other":                     {Name: "other", Cluster: otherCluster},
+	}
+	order := []string{argo.PrimaryDestinationName, "other"}
+
+	t.Run("no warning for a single destination", func(t *testing.T) {
+		t.Parallel()
+		m := &appStateManager{liveStateCache: &mockstatecache.LiveStateCache{}}
+		assert.Empty(t, m.warnOnDivergentCapabilities(resolved, []string{argo.PrimaryDestinationName}, metav1.Now()))
+	})
+
+	t.Run("no warning when destinations agree", func(t *testing.T) {
+		t.Parallel()
+		lsc := &mockstatecache.LiveStateCache{}
+		lsc.EXPECT().GetVersionsInfo(primaryCluster).Return("v1.30.0", nil, nil).Maybe()
+		lsc.EXPECT().GetVersionsInfo(otherCluster).Return("v1.30.0", nil, nil).Maybe()
+		m := &appStateManager{liveStateCache: lsc}
+		assert.Empty(t, m.warnOnDivergentCapabilities(resolved, order, metav1.Now()))
+	})
+
+	t.Run("warns when a destination runs a different version", func(t *testing.T) {
+		t.Parallel()
+		lsc := &mockstatecache.LiveStateCache{}
+		lsc.EXPECT().GetVersionsInfo(primaryCluster).Return("v1.30.0", nil, nil).Maybe()
+		lsc.EXPECT().GetVersionsInfo(otherCluster).Return("v1.26.4", nil, nil).Maybe()
+		m := &appStateManager{liveStateCache: lsc}
+
+		conditions := m.warnOnDivergentCapabilities(resolved, order, metav1.Now())
+		require.Len(t, conditions, 1)
+		assert.Equal(t, v1alpha1.ApplicationConditionMultipleDestinationsWarning, conditions[0].Type)
+		assert.Contains(t, conditions[0].Message, "v1.30.0")
+		assert.Contains(t, conditions[0].Message, `"other" is v1.26.4`)
+	})
+
+	t.Run("an unreadable version is not reported as divergence", func(t *testing.T) {
+		t.Parallel()
+		lsc := &mockstatecache.LiveStateCache{}
+		lsc.EXPECT().GetVersionsInfo(primaryCluster).Return("v1.30.0", nil, nil).Maybe()
+		lsc.EXPECT().GetVersionsInfo(otherCluster).Return("", nil, errors.New("cluster unreachable")).Maybe()
+		m := &appStateManager{liveStateCache: lsc}
+
+		// Unreachable clusters are surfaced by the comparison itself; adding a capability warning
+		// on top would be misleading noise.
+		assert.Empty(t, m.warnOnDivergentCapabilities(resolved, order, metav1.Now()))
+	})
 }

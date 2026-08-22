@@ -185,6 +185,7 @@ nav:
   - user-guide/private-repositories.md
   - user-guide/plugins.md
   - user-guide/multiple_sources.md
+  - user-guide/multiple_destinations.md
   - Source Integrity Verification:
     - user-guide/source-integrity.md
     - Git GnuPG verification: user-guide/source-integrity-git-gpg.md

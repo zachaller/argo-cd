@@ -1988,6 +1988,10 @@ const (
 	ApplicationConditionExcludedResourceWarning = "ExcludedResourceWarning"
 	// ApplicationConditionOrphanedResourceWarning indicates that application has orphaned resources
 	ApplicationConditionOrphanedResourceWarning = "OrphanedResourceWarning"
+	// ApplicationConditionMultipleDestinationsWarning indicates that an application's destinations do
+	// not agree on their Kubernetes version, so the capability set manifests were rendered against
+	// does not describe every destination
+	ApplicationConditionMultipleDestinationsWarning = "MultipleDestinationsWarning"
 )
 
 // ApplicationCondition contains details about an application condition, which is usually an error or warning
