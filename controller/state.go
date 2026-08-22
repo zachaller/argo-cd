@@ -94,58 +94,6 @@ type managedResource struct {
 	Destination string
 }
 
-// warnOnDivergentCapabilities reports when an application's destinations do not agree on their
-// Kubernetes version.
-//
-// Manifests are generated once, against the primary destination's cluster, so Helm's .Capabilities
-// and kustomize's API-version detection describe that cluster and no other. When the destinations
-// run different Kubernetes versions a chart can therefore render a resource whose API does not
-// exist where it lands. Generating per destination would mean one repo-server round trip per
-// destination and would break value-file sharing between sources, so the divergence is surfaced
-// rather than papered over.
-func (m *appStateManager) warnOnDivergentCapabilities(resolved map[string]argo.ResolvedDestination, order []string, now metav1.Time) []v1alpha1.ApplicationCondition {
-	if len(order) < 2 {
-		return nil
-	}
-	primary, ok := resolved[argo.PrimaryDestinationName]
-	if !ok {
-		return nil
-	}
-	primaryVersion, _, err := m.liveStateCache.GetVersionsInfo(primary.Cluster)
-	if err != nil {
-		// Not being able to read a version is reported elsewhere; do not add noise here.
-		return nil
-	}
-
-	var diverged []string
-	for _, name := range order {
-		if name == argo.PrimaryDestinationName {
-			continue
-		}
-		dest, ok := resolved[name]
-		if !ok {
-			continue
-		}
-		version, _, err := m.liveStateCache.GetVersionsInfo(dest.Cluster)
-		if err != nil {
-			continue
-		}
-		if version != primaryVersion {
-			diverged = append(diverged, fmt.Sprintf("%q is %s", name, version))
-		}
-	}
-	if len(diverged) == 0 {
-		return nil
-	}
-	return []v1alpha1.ApplicationCondition{{
-		Type: v1alpha1.ApplicationConditionMultipleDestinationsWarning,
-		Message: fmt.Sprintf(
-			"manifests are generated against spec.destination (Kubernetes %s); destinations %s differ, so Helm .Capabilities and kustomize API detection may not describe them",
-			primaryVersion, strings.Join(diverged, ", ")),
-		LastTransitionTime: &now,
-	}}
-}
-
 // diffCacheKey namespaces the diff cache by destination. The cache is keyed by resource identity
 // within an application, and the same group/kind/namespace/name may legitimately exist in two
 // destinations, so without this the two would share a cache entry. The primary destination keeps
@@ -232,6 +180,58 @@ type appStateManager struct {
 	repoErrorGracePeriod  time.Duration
 	serverSideDiff        bool
 	ignoreNormalizerOpts  normalizers.IgnoreNormalizerOpts
+}
+
+// warnOnDivergentCapabilities reports when an application's destinations do not agree on their
+// Kubernetes version.
+//
+// Manifests are generated once, against the primary destination's cluster, so Helm's .Capabilities
+// and kustomize's API-version detection describe that cluster and no other. When the destinations
+// run different Kubernetes versions a chart can therefore render a resource whose API does not
+// exist where it lands. Generating per destination would mean one repo-server round trip per
+// destination and would break value-file sharing between sources, so the divergence is surfaced
+// rather than papered over.
+func (m *appStateManager) warnOnDivergentCapabilities(resolved map[string]argo.ResolvedDestination, order []string, now metav1.Time) []v1alpha1.ApplicationCondition {
+	if len(order) < 2 {
+		return nil
+	}
+	primary, ok := resolved[argo.PrimaryDestinationName]
+	if !ok {
+		return nil
+	}
+	primaryVersion, _, err := m.liveStateCache.GetVersionsInfo(primary.Cluster)
+	if err != nil {
+		// Not being able to read a version is reported elsewhere; do not add noise here.
+		return nil
+	}
+
+	var diverged []string
+	for _, name := range order {
+		if name == argo.PrimaryDestinationName {
+			continue
+		}
+		dest, ok := resolved[name]
+		if !ok {
+			continue
+		}
+		version, _, err := m.liveStateCache.GetVersionsInfo(dest.Cluster)
+		if err != nil {
+			continue
+		}
+		if version != primaryVersion {
+			diverged = append(diverged, fmt.Sprintf("%q is %s", name, version))
+		}
+	}
+	if len(diverged) == 0 {
+		return nil
+	}
+	return []v1alpha1.ApplicationCondition{{
+		Type: v1alpha1.ApplicationConditionMultipleDestinationsWarning,
+		Message: fmt.Sprintf(
+			"manifests are generated against spec.destination (Kubernetes %s); destinations %s differ, so Helm .Capabilities and kustomize API detection may not describe them",
+			primaryVersion, strings.Join(diverged, ", ")),
+		LastTransitionTime: &now,
+	}}
 }
 
 // EvaluateAppRevisionsChanges checks if any source revisions have changes without generating manifests.
