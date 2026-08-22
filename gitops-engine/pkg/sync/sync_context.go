@@ -112,6 +112,20 @@ func WithInitialState(phase common.OperationPhase, message string, results []com
 }
 
 // WithResourcesFilter sets sync operation resources filter
+// WithSyncTaskFilter sets a filter applied to sync tasks after they have been built, when each
+// task's phase and wave are known. Returning false holds the task back for this sync; it is not
+// failed or skipped, and will be considered again on the next call to Sync.
+//
+// This exists because WithResourcesFilter cannot express a phase- or wave-based decision: it is
+// consulted per resource, before tasks are built, and one resource may expand into tasks in several
+// phases. A caller coordinating several sync contexts uses this to keep them in step, by holding
+// back every task beyond the wave the slowest context has reached.
+func WithSyncTaskFilter(syncTaskFilter func(phase common.SyncPhase, wave int) bool) SyncOpt {
+	return func(ctx *syncContext) {
+		ctx.syncTaskFilter = syncTaskFilter
+	}
+}
+
 func WithResourcesFilter(resourcesFilter func(key kubeutil.ResourceKey, target *unstructured.Unstructured, live *unstructured.Unstructured) bool) SyncOpt {
 	return func(ctx *syncContext) {
 		ctx.resourcesFilter = resourcesFilter
@@ -405,6 +419,7 @@ type syncContext struct {
 	validate                        bool
 	skipHooks                       bool
 	resourcesFilter                 func(key kubeutil.ResourceKey, target *unstructured.Unstructured, live *unstructured.Unstructured) bool
+	syncTaskFilter                  func(phase common.SyncPhase, wave int) bool
 	prune                           bool
 	replace                         bool
 	serverSideApply                 bool
@@ -496,6 +511,11 @@ func (sc *syncContext) Sync(ctx context.Context) {
 	defer span.End()
 	sc.log.WithValues("skipHooks", sc.skipHooks, "started", sc.started()).Info("Syncing")
 	tasks, ok := sc.getSyncTasks(ctx)
+	if ok && sc.syncTaskFilter != nil {
+		// Held-back tasks stay pending rather than being failed or skipped, so the operation
+		// remains Running and they are reconsidered on the next pass.
+		tasks = tasks.Filter(func(t *syncTask) bool { return sc.syncTaskFilter(t.phase, t.wave()) })
+	}
 	if !ok {
 		// Collect distinct error messages from failed resource results so that the
 		// operation phase message surfaces the actual root cause (e.g. cluster API

@@ -3329,3 +3329,59 @@ func TestTerminate_Hooks_Error(t *testing.T) {
 	assert.Equal(t, synccommon.OperationError, results[0].HookPhase)
 	assert.Contains(t, results[0].Message, "update failed")
 }
+
+func TestSyncTaskFilterHoldsTasksBack(t *testing.T) {
+	pod := testingutils.NewPod()
+	pod.SetNamespace(testingutils.FakeArgoCDNamespace)
+
+	t.Run("a task the filter rejects is not applied and the sync does not fail", func(t *testing.T) {
+		syncCtx := newTestSyncCtx(nil, WithSyncTaskFilter(func(_ synccommon.SyncPhase, _ int) bool {
+			return false
+		}))
+		syncCtx.resources = groupResources(ReconciliationResult{
+			Live:   []*unstructured.Unstructured{nil},
+			Target: []*unstructured.Unstructured{pod},
+		})
+
+		syncCtx.Sync(context.Background())
+		phase, _, resources := syncCtx.GetState()
+
+		// Holding a task back must leave it pending, not mark it failed or skipped: the
+		// coordinating caller will let it through on a later pass.
+		assert.NotEqual(t, synccommon.OperationFailed, phase)
+		assert.NotEqual(t, synccommon.OperationError, phase)
+		assert.Empty(t, resources, "a held-back task must not produce a result")
+	})
+
+	t.Run("a task the filter accepts is applied as usual", func(t *testing.T) {
+		syncCtx := newTestSyncCtx(nil, WithSyncTaskFilter(func(_ synccommon.SyncPhase, _ int) bool {
+			return true
+		}))
+		syncCtx.resources = groupResources(ReconciliationResult{
+			Live:   []*unstructured.Unstructured{nil},
+			Target: []*unstructured.Unstructured{pod},
+		})
+
+		syncCtx.Sync(context.Background())
+		_, _, resources := syncCtx.GetState()
+		assert.Len(t, resources, 1)
+	})
+
+	t.Run("the filter sees the task's wave", func(t *testing.T) {
+		waved := pod.DeepCopy()
+		waved.SetAnnotations(map[string]string{synccommon.AnnotationSyncWave: "3"})
+
+		var seen []int
+		syncCtx := newTestSyncCtx(nil, WithSyncTaskFilter(func(_ synccommon.SyncPhase, wave int) bool {
+			seen = append(seen, wave)
+			return true
+		}))
+		syncCtx.resources = groupResources(ReconciliationResult{
+			Live:   []*unstructured.Unstructured{nil},
+			Target: []*unstructured.Unstructured{waved},
+		})
+
+		syncCtx.Sync(context.Background())
+		assert.Contains(t, seen, 3, "the filter must receive the wave from the sync-wave annotation")
+	})
+}
