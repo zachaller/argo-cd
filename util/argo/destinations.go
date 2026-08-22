@@ -129,28 +129,32 @@ func ValidateDestinationNames(destinations []argoappv1.NamedDestination) []strin
 	return errs
 }
 
-// ValidateDistinctDestinations checks that no two resolved destinations refer to the same cluster
-// and namespace.
+// ValidateDistinctDestinations checks that no two resolved destinations refer to the same cluster.
 //
-// Overlapping destinations would share a single cluster cache, so the same live object would be
-// handed to both partitions and both would claim ownership of it, producing a repeated apply and an
-// oscillating diff. Rejecting the spec is the only safe outcome.
+// Two destinations sharing a cluster cannot be told apart, even with different namespaces. Live
+// objects are fetched per cluster and attributed to an application by its tracking annotation, which
+// names the application and not the destination, so both partitions receive the same live set. Each
+// then sees the other's resources as unmatched extras: with pruning on they delete each other's
+// resources, and without it both report OutOfSync forever.
+//
+// Attributing a live object to a destination would mean putting the destination in the tracking
+// annotation, which would rewrite it on every resource of every existing application on upgrade.
+// Requiring a cluster per destination is the cheaper correct answer, and matches what the feature is
+// for: an application deploying into more than one cluster.
 func ValidateDistinctDestinations(resolved map[string]ResolvedDestination, order []string) []string {
 	var errs []string
-	type target struct{ server, namespace string }
-	seen := make(map[target]string, len(order))
+	seen := make(map[string]string, len(order))
 	for _, name := range order {
 		d, ok := resolved[name]
 		if !ok || d.Cluster == nil {
 			continue
 		}
-		key := target{server: d.Cluster.Server, namespace: d.Destination.Namespace}
-		if previous, dup := seen[key]; dup {
-			errs = append(errs, fmt.Sprintf("destinations %s and %s both target cluster %q namespace %q; destinations must be distinct",
-				describeDestination(previous), describeDestination(name), key.server, key.namespace))
+		if previous, dup := seen[d.Cluster.Server]; dup {
+			errs = append(errs, fmt.Sprintf("destinations %s and %s both resolve to cluster %q; each destination must be a different cluster",
+				describeDestination(previous), describeDestination(name), d.Cluster.Server))
 			continue
 		}
-		seen[key] = name
+		seen[d.Cluster.Server] = name
 	}
 	return errs
 }

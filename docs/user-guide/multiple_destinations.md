@@ -40,9 +40,17 @@ spec:
 
 A destination name must not contain `/` or `@`, because RBAC object strings use those as separators.
 
-No two destinations may resolve to the same cluster **and** namespace. Overlapping destinations would
-share one cluster cache, so the same live object would be claimed by both, producing a repeated apply
-and an oscillating diff. Such a spec is rejected.
+**Each destination must be a different cluster.** Two destinations on the same cluster are rejected
+even when their namespaces differ.
+
+Argo CD reads a cluster's live objects once per cluster and attributes them to an Application by its
+tracking annotation, which names the Application and not the destination. Two destinations sharing a
+cluster therefore receive the same set of live objects, and each treats the other's resources as
+extras: with pruning enabled they would delete each other's resources, and without it both would
+report `OutOfSync` forever.
+
+Use a single destination with namespaced manifests if you want to deploy into several namespaces of
+one cluster — that has always worked and needs none of this.
 
 ## Declaring destinations from the CLI
 

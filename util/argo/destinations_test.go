@@ -109,20 +109,23 @@ func TestResolveDestinations(t *testing.T) {
 func TestValidateDistinctDestinations(t *testing.T) {
 	t.Parallel()
 
-	t.Run("same cluster with different namespaces is allowed", func(t *testing.T) {
+	t.Run("distinct clusters are allowed", func(t *testing.T) {
 		t.Parallel()
 		resolved := map[string]ResolvedDestination{
 			PrimaryDestinationName: {Destination: argoappv1.ApplicationDestination{Namespace: "a"}, Cluster: &argoappv1.Cluster{Server: "https://one"}},
-			"second":               {Name: "second", Destination: argoappv1.ApplicationDestination{Namespace: "b"}, Cluster: &argoappv1.Cluster{Server: "https://one"}},
+			"second":               {Name: "second", Destination: argoappv1.ApplicationDestination{Namespace: "b"}, Cluster: &argoappv1.Cluster{Server: "https://two"}},
 		}
 		assert.Empty(t, ValidateDistinctDestinations(resolved, []string{PrimaryDestinationName, "second"}))
 	})
 
-	t.Run("same cluster and namespace is rejected", func(t *testing.T) {
+	t.Run("the same cluster is rejected even with different namespaces", func(t *testing.T) {
 		t.Parallel()
+		// Live objects are fetched per cluster and attributed by an annotation that names the
+		// application, not the destination, so two destinations on one cluster receive the same
+		// live set and each treats the other's resources as extras.
 		resolved := map[string]ResolvedDestination{
 			PrimaryDestinationName: {Destination: argoappv1.ApplicationDestination{Namespace: "a"}, Cluster: &argoappv1.Cluster{Server: "https://one"}},
-			"second":               {Name: "second", Destination: argoappv1.ApplicationDestination{Namespace: "a"}, Cluster: &argoappv1.Cluster{Server: "https://one"}},
+			"second":               {Name: "second", Destination: argoappv1.ApplicationDestination{Namespace: "b"}, Cluster: &argoappv1.Cluster{Server: "https://one"}},
 		}
 		errs := ValidateDistinctDestinations(resolved, []string{PrimaryDestinationName, "second"})
 		require.Len(t, errs, 1)
@@ -140,7 +143,7 @@ func TestValidateDistinctDestinations(t *testing.T) {
 		}
 		errs := ValidateDistinctDestinations(resolved, []string{PrimaryDestinationName, "by-url", "by-name"})
 		require.Len(t, errs, 1)
-		assert.Contains(t, errs[0], "must be distinct")
+		assert.Contains(t, errs[0], "must be a different cluster")
 	})
 }
 
@@ -253,7 +256,7 @@ func TestValidatePermissionsMultipleDestinations(t *testing.T) {
 		conditions, err := ValidatePermissions(t.Context(), &spec, &proj, db)
 		require.NoError(t, err)
 		require.Len(t, conditions, 1)
-		assert.Contains(t, conditions[0].Message, "must be distinct")
+		assert.Contains(t, conditions[0].Message, "must be a different cluster")
 	})
 
 	t.Run("invalid destination name short-circuits before resolution", func(t *testing.T) {
