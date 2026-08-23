@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -67,6 +68,19 @@ func EnsureSecondCluster(t *testing.T, ctx fixture.TestContext) *SecondCluster {
 	client, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		t.Fatalf("could not build a client for the second cluster: %v", err)
+	}
+
+	// The second cluster must not be the one Argo CD itself resolves the primary destination to.
+	// In e2e Argo CD runs outside the cluster, so the in-cluster address is resolved from the
+	// default kubeconfig's current context; a tool that merges a new cluster into that file and
+	// switches to it (k3d does both by default) silently repoints the primary destination here.
+	// Both destinations then share an API server, each sees the other's resources as unmanaged, and
+	// they prune each other -- which surfaces as resources vanishing after a successful sync, a
+	// long way from the cause.
+	if primary, err := defaultKubeconfigHost(); err == nil && primary == config.Host {
+		t.Fatalf("the second cluster (%s) is the same API server as the default kubeconfig's current context, "+
+			"so Argo CD would resolve both destinations to it; create it without updating or switching "+
+			"the default kubeconfig", config.Host)
 	}
 
 	// A bearer token for a service account with cluster-manager permissions, which is how Argo CD
@@ -146,6 +160,24 @@ func (c *SecondCluster) DescribeConfigMap(t *testing.T, namespace, name string) 
 	}
 	return fmt.Sprintf("present tracking-id=%q label-instance=%q",
 		cm.Annotations[common.AnnotationKeyAppInstance], cm.Labels[common.LabelKeyAppInstance])
+}
+
+// defaultKubeconfigHost returns the API server of the current context in the kubeconfig Argo CD
+// would fall back to for the in-cluster address.
+func defaultKubeconfigHost() (string, error) {
+	path := os.Getenv("KUBECONFIG")
+	if path == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(home, ".kube", "config")
+	}
+	config, err := clientcmd.BuildConfigFromFlags("", path)
+	if err != nil {
+		return "", err
+	}
+	return config.Host, nil
 }
 
 func waitForNamespaceGone(ctx context.Context, client kubernetes.Interface, namespace string) error {

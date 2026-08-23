@@ -638,7 +638,15 @@ jobs:
           # cluster in Docker, at the same Kubernetes version as the k3s one above, so both
           # clusters exercise the version this matrix leg is for.
           curl -sfL "https://raw.githubusercontent.com/k3d-io/k3d/${K3D_VERSION}/install.sh" | TAG="${K3D_VERSION}" bash
+          # --kubeconfig-update-default=false is load-bearing, not tidiness. Argo CD runs outside the
+          # cluster in e2e (ARGOCD_FAKE_IN_CLUSTER=true), so the primary destination -- the in-cluster
+          # address -- is resolved from the default kubeconfig's current context. k3d merges each new
+          # cluster into that file and switches the context to it by default, which silently
+          # repoints the primary destination at this second cluster. Both destinations then share one
+          # API server, each sees the other's resources as unmanaged, and they prune each other.
           k3d cluster create argocd-e2e-second \
+            --kubeconfig-update-default=false \
+            --kubeconfig-switch-context=false \
             --image "rancher/k3s:${K3S_IMAGE_VERSION}-k3s1" \
             --no-lb \
             --k3s-arg "--disable=traefik@server:0" \
