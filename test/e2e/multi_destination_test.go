@@ -61,20 +61,21 @@ func TestMultiDestinationPlacement(t *testing.T) {
 		When().
 		Sync().
 		Then().
-		Expect(SyncStatusIs(SyncStatusCodeSynced)).
-		Expect(HealthIs(health.HealthStatusHealthy)).
+		// Where the resources landed is asserted first, and read from each cluster's own API rather
+		// than from what Argo CD reports. It is the fact this test exists to establish, and it is
+		// answerable the moment the sync has applied; putting it after an expectation that waits for
+		// convergence would lose it entirely whenever convergence is what is broken.
 		And(func(_ *Application) {
-			// The annotated ConfigMap is in the second cluster and nowhere else.
 			assert.True(t, second.HasConfigMap(t, secondDestinationNamespace, "second-cm"),
 				"the annotated manifest must land in the second destination's cluster")
 			assert.False(t, second.HasConfigMap(t, secondDestinationNamespace, "primary-cm"),
 				"an unannotated manifest must not land in the second destination")
-		}).
-		And(func(_ *Application) {
-			// The unannotated ConfigMap is in the primary destination.
+
 			_, err := fixture.KubeClientset.CoreV1().ConfigMaps(ctx.DeploymentNamespace()).Get(t.Context(), "primary-cm", metav1.GetOptions{})
 			require.NoError(t, err, "the unannotated manifest must land in the primary destination")
-		})
+		}).
+		Expect(SyncStatusIs(SyncStatusCodeSynced)).
+		Expect(HealthIs(health.HealthStatusHealthy))
 }
 
 // TestMultiDestinationStatusIsPerDestination checks that the resources an Application reports carry
