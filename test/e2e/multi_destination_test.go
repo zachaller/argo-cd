@@ -134,7 +134,12 @@ func TestMultiDestinationSameClusterRejected(t *testing.T) {
 		IgnoreErrors().
 		CreateApp("--dest", fmt.Sprintf("name=same,server=%s,namespace=%s", KubernetesInternalAPIServerAddr, secondDestinationNamespace)).
 		Then().
-		Expect(Condition(ApplicationConditionInvalidSpecError, "must be a different cluster"))
+		// The API server refuses the create outright, so there is no Application to carry a
+		// condition -- the rejection is only visible in what the CLI reports.
+		AndCLIOutput(func(_ string, err error) {
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "must be a different cluster")
+		})
 }
 
 // TestMultiDestinationDisabledByDefault checks the feature gate: without the argocd-cm opt in, an
@@ -146,5 +151,8 @@ func TestMultiDestinationDisabledByDefault(t *testing.T) {
 		IgnoreErrors().
 		CreateApp("--dest", fmt.Sprintf("name=second,server=%s,namespace=%s", KubernetesInternalAPIServerAddr, secondDestinationNamespace)).
 		Then().
-		Expect(Condition(ApplicationConditionInvalidSpecError, "application.destinations.enabled"))
+		AndCLIOutput(func(_ string, err error) {
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "application.destinations.enabled")
+		})
 }
