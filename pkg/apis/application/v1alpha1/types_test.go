@@ -6444,7 +6444,7 @@ func TestApplicationTreeFindNode(t *testing.T) {
 		found, err := tree.FindNode("apps", "Deployment", "ns", "web", PrimaryDestinationSelector)
 		require.NoError(t, err)
 		require.NotNil(t, found)
-		assert.Equal(t, PrimaryDestinationName, found.Destination)
+		assert.Empty(t, found.Destination, "the primary destination")
 		assert.Equal(t, "-web", found.UID)
 	})
 

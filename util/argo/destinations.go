@@ -12,9 +12,13 @@ import (
 	argoappv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 )
 
-// PrimaryDestinationName is re-exported from the API package, where FindNode and the destination
-// selectors also need it, so that both refer to one definition.
-const PrimaryDestinationName = argoappv1.PrimaryDestinationName
+// PrimaryDestinationName is the name of the implicit destination backed by spec.destination.
+// Manifests without the argocd.argoproj.io/destination annotation are routed to it.
+//
+// The API package spells this out as "" rather than importing it, because doing so would be an
+// import cycle -- and because test/e2e dot-imports both packages, so the same exported name in each
+// would be a redeclaration there.
+const PrimaryDestinationName = ""
 
 // destinationNameDisallowedCharSet lists characters that may not appear in a destination name.
 // '/' and '@' are excluded because RBAC object strings use them as separators.

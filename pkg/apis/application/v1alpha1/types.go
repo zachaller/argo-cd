@@ -2209,11 +2209,6 @@ type ApplicationSummary struct {
 	IsAppOfApps bool `json:"isAppOfApps,omitempty" protobuf:"bytes,3,opt,name=isAppOfApps"`
 }
 
-// PrimaryDestinationName is the name of the implicit destination backed by spec.destination.
-// Manifests without the argocd.argoproj.io/destination annotation are routed to it, and a resource
-// in it carries an empty destination throughout the API.
-const PrimaryDestinationName = ""
-
 // PrimaryDestinationSelector addresses the primary destination -- the one backed by
 // spec.destination -- in a request that selects a resource by destination.
 //
@@ -2230,7 +2225,9 @@ func DestinationSelectorMatches(selector string, nodeDestination string) bool {
 	case "":
 		return true
 	case PrimaryDestinationSelector:
-		return nodeDestination == PrimaryDestinationName
+		// A resource in the primary destination carries an empty destination. The name of that
+		// destination lives in util/argo, which cannot be imported here without a cycle.
+		return nodeDestination == ""
 	default:
 		return nodeDestination == selector
 	}
@@ -2239,7 +2236,7 @@ func DestinationSelectorMatches(selector string, nodeDestination string) bool {
 // DestinationSelectorFor returns the selector that addresses a node's own destination, which is what
 // a client echoes back when it wants to act on exactly the resource it is looking at.
 func DestinationSelectorFor(nodeDestination string) string {
-	if nodeDestination == PrimaryDestinationName {
+	if nodeDestination == "" {
 		return PrimaryDestinationSelector
 	}
 	return nodeDestination
@@ -2277,7 +2274,7 @@ func (t *ApplicationTree) FindNode(group string, kind string, namespace string, 
 	}
 	if len(destinations) > 1 {
 		for i, d := range destinations {
-			if d == PrimaryDestinationName {
+			if d == "" {
 				// The primary destination has no name; the selector is what a user can act on.
 				destinations[i] = PrimaryDestinationSelector
 			}
