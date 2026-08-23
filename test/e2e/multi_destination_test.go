@@ -41,10 +41,11 @@ func enableMultiDestination(t *testing.T) {
 // once per cluster -- two destinations backed by the same API server would each see the other's
 // resources.
 func TestMultiDestinationPlacement(t *testing.T) {
-	second := clusterFixture.EnsureSecondCluster(t)
-	enableMultiDestination(t)
-
+	// Order matters: Given empties argocd-cm as part of cleaning state, so the feature gate has to
+	// be set after it, and the second cluster registered without cleaning state again.
 	ctx := Given(t)
+	enableMultiDestination(t)
+	second := clusterFixture.EnsureSecondCluster(t, ctx)
 	second.RecreateNamespace(t, secondDestinationNamespace)
 
 	ctx.
@@ -79,10 +80,11 @@ func TestMultiDestinationPlacement(t *testing.T) {
 // TestMultiDestinationStatusIsPerDestination checks that the resources an Application reports carry
 // the destination they belong to, which is what the UI and CLI group on.
 func TestMultiDestinationStatusIsPerDestination(t *testing.T) {
-	second := clusterFixture.EnsureSecondCluster(t)
-	enableMultiDestination(t)
-
+	// Order matters: Given empties argocd-cm as part of cleaning state, so the feature gate has to
+	// be set after it, and the second cluster registered without cleaning state again.
 	ctx := Given(t)
+	enableMultiDestination(t)
+	second := clusterFixture.EnsureSecondCluster(t, ctx)
 	second.RecreateNamespace(t, secondDestinationNamespace)
 
 	ctx.
@@ -106,10 +108,11 @@ func TestMultiDestinationStatusIsPerDestination(t *testing.T) {
 // Application does not declare fails the Application rather than being deployed somewhere. Routing
 // it to the primary destination would put a resource in a cluster nobody asked for.
 func TestMultiDestinationUndeclaredDestinationFailsApp(t *testing.T) {
-	second := clusterFixture.EnsureSecondCluster(t)
+	ctx := Given(t)
 	enableMultiDestination(t)
+	second := clusterFixture.EnsureSecondCluster(t, ctx)
 
-	Given(t).
+	ctx.
 		Path(multiDestinationUndeclaredPath).
 		When().
 		IgnoreErrors().
@@ -122,9 +125,10 @@ func TestMultiDestinationUndeclaredDestinationFailsApp(t *testing.T) {
 // cluster cannot be told apart when live objects are read, so each would treat the other's resources
 // as extras. This needs only one cluster, so it runs in any e2e environment.
 func TestMultiDestinationSameClusterRejected(t *testing.T) {
+	ctx := Given(t)
 	enableMultiDestination(t)
 
-	Given(t).
+	ctx.
 		Path(guestbookPath).
 		When().
 		IgnoreErrors().

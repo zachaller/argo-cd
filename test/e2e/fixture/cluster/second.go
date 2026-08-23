@@ -14,6 +14,8 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/argoproj/argo-cd/v3/common"
+	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+	"github.com/argoproj/argo-cd/v3/test/e2e/fixture"
 	"github.com/argoproj/argo-cd/v3/util/clusterauth"
 )
 
@@ -48,7 +50,12 @@ func SkipUnlessSecondCluster(t *testing.T) {
 
 // EnsureSecondCluster registers the second cluster with Argo CD and returns a handle to it. It is
 // idempotent: the cluster is upserted, so tests may call it freely.
-func EnsureSecondCluster(t *testing.T) *SecondCluster {
+//
+// It takes the test's existing context rather than starting its own, because fixture.EnsureCleanState
+// empties argocd-cm. Cleaning state a second time here would undo any setting the test had already
+// made -- the multi-destination feature gate above all, without which the Application under test is
+// rejected before it can sync.
+func EnsureSecondCluster(t *testing.T, ctx fixture.TestContext) *SecondCluster {
 	t.Helper()
 	SkipUnlessSecondCluster(t)
 
@@ -69,10 +76,13 @@ func EnsureSecondCluster(t *testing.T) *SecondCluster {
 		t.Fatalf("could not install cluster manager RBAC on the second cluster: %v", err)
 	}
 
-	Given(t).
+	GivenWithSameState(ctx).
 		Name("second-cluster").
 		Server(config.Host).
 		BearerToken(token).
+		// The cluster is created for this test run and signs its own certificate, which Argo CD has
+		// no reason to trust. The test is about where resources land, not about TLS.
+		TLSClientConfig(v1alpha1.TLSClientConfig{Insecure: true}).
 		Upsert(true).
 		When().
 		Create()
