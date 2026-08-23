@@ -178,6 +178,30 @@ silently revoke per-application grants on upgrade.
 Only the *named* destinations are checked. The primary has no name, so its object would be
 `<project>/`, and checking it would make the flag unsafe to enable fleet-wide.
 
+### Addressing a resource by destination
+
+A resource-level request -- read the live object, patch it, delete it, run an action on it -- names a
+group, kind, namespace and name. With one destination that identifies a resource. With several it may
+not: the same object can exist in two clusters.
+
+Those requests carry a destination, and the tree lookup narrows to it. Rejecting an ambiguous lookup
+is still the default, because a request that says nothing about the destination must not be resolved
+to whichever cluster happened to be searched first.
+
+The primary destination needs a name here. An empty destination already means "not given, resolve it
+if you can" -- that is what every existing client sends -- so it cannot also mean the primary. It is
+addressed as `@primary`: a destination name may not contain `@`, so the value can never collide with
+one a user chose, and unlike a proto field that distinguishes unset from empty it survives query
+parameters, JSON and shell quoting, which is where this value actually travels.
+
+The event query deliberately does not take a destination. It matches on UID, which is already unique
+per cluster, so the field would be dead API surface.
+
+The same filter has to apply before a client decides a request is ambiguous. The CLI builds its
+target list from an Application's managed resources and refuses more than one match; without
+filtering by destination first it would report that the inputs match several resources and suggest
+acting on all of them, which would act on the copy in every cluster rather than the one meant.
+
 ### Sharding
 
 The shard is still chosen from `spec.destination`, so an Application has exactly one owning shard.
@@ -233,6 +257,6 @@ be deployed to the primary destination. Operators should remove the field before
 
 * A cluster may be watched by more than one controller shard, costing memory and API server load.
 * Manifest generation reflects one destination's capabilities.
-* Addressing a resource that exists in two destinations needs a destination on resource-level API
-  requests; until then such a resource is rejected as ambiguous rather than acted on in the wrong
-  cluster.
+* Every resource-level API request, and its CLI and UI callers, gained a destination. A resource that
+  exists in two destinations cannot be addressed without one, so a client that omits it still gets an
+  error -- deliberately, since the alternative is acting on the wrong cluster.
