@@ -297,22 +297,34 @@ func (s *Server) getApplicationEnforceRBACClient(ctx context.Context, action, pr
 // The object is "<project>/<destination-name>", matching how the resource is registered as project
 // scoped in util/rbac.
 func (s *Server) enforceDestinations(ctx context.Context, project string, dests []v1alpha1.NamedDestination, action string) error {
+	return enforceDestinations(ctx, s.enf, s.settingsMgr, project, dests, action)
+}
+
+// DestinationRBACGates reads the argocd-cm gates for the destinations authorization axis. It is
+// satisfied by *settings.SettingsManager, and keeps this check callable from the terminal handler,
+// which has no Server. It is exported only because that handler's constructor takes one.
+type DestinationRBACGates interface {
+	IsDestinationRBACEnabled() (bool, error)
+	IsDestinationRBACEnforced() (bool, error)
+}
+
+func enforceDestinations(ctx context.Context, enf *rbac.Enforcer, gates DestinationRBACGates, project string, dests []v1alpha1.NamedDestination, action string) error {
 	if len(dests) == 0 {
 		return nil
 	}
-	enabled, err := s.settingsMgr.IsDestinationRBACEnabled()
+	enabled, err := gates.IsDestinationRBACEnabled()
 	if err != nil {
 		return fmt.Errorf("error checking whether destination RBAC is enabled: %w", err)
 	}
 	if !enabled {
 		return nil
 	}
-	enforced, err := s.settingsMgr.IsDestinationRBACEnforced()
+	enforced, err := gates.IsDestinationRBACEnforced()
 	if err != nil {
 		return fmt.Errorf("error checking whether destination RBAC is enforced: %w", err)
 	}
 	for _, dest := range dests {
-		err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceDestinations, action, project+"/"+dest.Name)
+		err := enf.EnforceErr(ctx.Value("claims"), rbac.ResourceDestinations, action, project+"/"+dest.Name)
 		if err == nil {
 			continue
 		}

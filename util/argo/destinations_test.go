@@ -147,6 +147,26 @@ func TestValidateDistinctDestinations(t *testing.T) {
 	})
 }
 
+func TestIsValidDestinationSelector(t *testing.T) {
+	for _, tc := range []struct {
+		selector string
+		valid    bool
+	}{
+		{selector: "", valid: true},
+		{selector: argoappv1.PrimaryDestinationSelector, valid: true},
+		{selector: "second", valid: true},
+		{selector: "shared-services", valid: true},
+		// The characters RBAC object strings separate on cannot appear in a destination name, so a
+		// selector carrying one could never name a declared destination.
+		{selector: "proj/second", valid: false},
+		{selector: "second@primary", valid: false},
+	} {
+		t.Run(tc.selector, func(t *testing.T) {
+			assert.Equal(t, tc.valid, IsValidDestinationSelector(tc.selector))
+		})
+	}
+}
+
 func TestPartitionByDestination(t *testing.T) {
 	t.Parallel()
 

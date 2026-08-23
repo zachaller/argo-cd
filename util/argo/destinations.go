@@ -170,6 +170,17 @@ func describeDestination(name string) string {
 	return fmt.Sprintf("%q", name)
 }
 
+// IsValidDestinationSelector reports whether a selector received from a client can name a
+// destination. An empty selector means none was given, PrimaryDestinationSelector names the primary
+// destination, and anything else must obey the rule a declared name obeys: it may not contain the
+// characters RBAC object strings use as separators.
+func IsValidDestinationSelector(selector string) bool {
+	if selector == "" || selector == argoappv1.PrimaryDestinationSelector {
+		return true
+	}
+	return !strings.ContainsAny(selector, destinationNameDisallowedCharSet)
+}
+
 // DestinationNameForObject returns the destination the manifest is annotated for, or
 // PrimaryDestinationName when it carries no destination annotation.
 func DestinationNameForObject(un *unstructured.Unstructured) string {

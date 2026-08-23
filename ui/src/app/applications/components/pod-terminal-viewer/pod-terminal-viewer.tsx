@@ -8,6 +8,7 @@ import {useCallback, useEffect} from 'react';
 import {debounceTime, takeUntil} from 'rxjs/operators';
 import {fromEvent, ReplaySubject, Subject} from 'rxjs';
 import {Context} from '../../../shared/context';
+import {destinationSelector} from '../../../shared/services/applications-service';
 import {Tooltip} from 'argo-ui/v2';
 import {ErrorNotification, NotificationType} from 'argo-ui';
 export interface PodTerminalViewerProps {
@@ -167,11 +168,14 @@ export const PodTerminalViewer: React.FC<PodTerminalViewerProps> = ({
 
     function setupConnection() {
         const {name = '', namespace = ''} = selectedNode || {};
+        // The destination of the pod the terminal was opened on, so the shell is opened in the cluster
+        // that pod runs in rather than in spec.destination.
+        const destination = destinationSelector(selectedNode || {});
         const url = `${location.host}${appContext.baseHref}`.replace(/\/$/, '');
         webSocketRef.current = new WebSocket(
             `${
                 location.protocol === 'https:' ? 'wss' : 'ws'
-            }://${url}/terminal?pod=${name}&container=${containerName}&appName=${applicationName}&appNamespace=${applicationNamespace}&projectName=${projectName}&namespace=${namespace}`
+            }://${url}/terminal?pod=${name}&container=${containerName}&appName=${applicationName}&appNamespace=${applicationNamespace}&projectName=${projectName}&namespace=${namespace}&destination=${encodeURIComponent(destination)}`
         );
         webSocketRef.current.onopen = onConnectionOpen;
         webSocketRef.current.onclose = onConnectionClose;

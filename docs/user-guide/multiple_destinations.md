@@ -169,6 +169,18 @@ next attempt starts clean everywhere.
 > safe to run against a different one -- and it does not block the deletion of the destinations that
 > are still reachable.
 
+## Opening a terminal into a pod
+
+A terminal opens in the cluster the pod actually runs in. The UI sends the destination of the pod you
+selected in the resource tree, so nothing has to be chosen by hand.
+
+If a pod with the same name and namespace exists in more than one of the Application's destinations and
+the request does not name one, it is refused rather than resolved to whichever was found first --
+opening a shell in the wrong cluster is worse than refusing to open one.
+
+The `exec` check and the [`destinations` check](../operator-manual/rbac.md#the-destinations-resource) must
+both allow it, the latter against the destination the pod is in.
+
 ## Addressing a resource that exists in two destinations
 
 Argo CD identifies a live resource by its group, kind, namespace and name. When an Application's

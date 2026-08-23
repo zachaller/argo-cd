@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -38,6 +39,9 @@ type terminalHandler struct {
 	enabledNamespaces []string
 	sessionManager    *util_session.SessionManager
 	terminalOptions   *TerminalOptions
+	// settingsMgr reads the destinations RBAC gates. Without it this path could not take part in
+	// the destinations authorization axis at all.
+	settingsMgr DestinationRBACGates
 }
 
 type TerminalOptions struct {
@@ -46,7 +50,7 @@ type TerminalOptions struct {
 }
 
 // NewHandler returns a new terminal handler.
-func NewHandler(appLister applisters.ApplicationLister, namespace string, enabledNamespaces []string, db db.ArgoDB, appResourceTree AppResourceTreeFn, allowedShells []string, sessionManager *util_session.SessionManager, terminalOptions *TerminalOptions) *terminalHandler {
+func NewHandler(appLister applisters.ApplicationLister, namespace string, enabledNamespaces []string, db db.ArgoDB, appResourceTree AppResourceTreeFn, allowedShells []string, sessionManager *util_session.SessionManager, terminalOptions *TerminalOptions, settingsMgr DestinationRBACGates) *terminalHandler {
 	return &terminalHandler{
 		appLister:         appLister,
 		db:                db,
@@ -56,11 +60,19 @@ func NewHandler(appLister applisters.ApplicationLister, namespace string, enable
 		enabledNamespaces: enabledNamespaces,
 		sessionManager:    sessionManager,
 		terminalOptions:   terminalOptions,
+		settingsMgr:       settingsMgr,
 	}
 }
 
-func (s *terminalHandler) getApplicationClusterRawConfig(ctx context.Context, a *appv1.Application) (*rest.Config, error) {
-	destCluster, err := argo.GetDestinationCluster(ctx, a.Spec.Destination, s.db)
+// getApplicationClusterRawConfig returns the raw REST config of the destination the pod is in.
+// destName is the name of one of the Application's destinations, or the empty string for the
+// primary one, so a terminal opens in the cluster the pod actually runs in.
+func (s *terminalHandler) getApplicationClusterRawConfig(ctx context.Context, a *appv1.Application, destName string) (*rest.Config, error) {
+	destination, err := a.Spec.GetDestination(destName)
+	if err != nil {
+		return nil, err
+	}
+	destCluster, err := argo.GetDestinationCluster(ctx, destination, s.db)
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +118,15 @@ func (s *terminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	appNamespace := q.Get("appNamespace")
+	// Which of the Application's destinations the pod is in. Empty means the client did not say,
+	// which is what every client that predates multiple destinations sends; the pod is then looked
+	// up across all of them and the request is rejected if that is ambiguous.
+	destination := q.Get("destination")
 
+	if !argo.IsValidDestinationSelector(destination) {
+		http.Error(w, "Destination name is not valid", http.StatusBadRequest)
+		return
+	}
 	if !argo.IsValidPodName(podName) {
 		http.Error(w, "Pod name is not valid", http.StatusBadRequest)
 		return
@@ -179,7 +199,33 @@ func (s *terminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	config, err := s.getApplicationClusterRawConfig(ctx, a)
+	resourceTree, err := s.appResourceTreeFn(ctx, a)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// From the tree find the pod which matches the given pod, in the destination it names. The pod's
+	// own destination is what everything below is done against: the cluster the terminal opens in,
+	// and the destination the request is authorized against.
+	podNode, err := findPodNode(resourceTree.Nodes, podName, namespace, destination)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if podNode == nil {
+		http.Error(w, "Pod doesn't belong to specified app", http.StatusBadRequest)
+		return
+	}
+
+	// The destination the pod is actually in, now that the lookup has established which one it is
+	// unambiguously. A destinations policy is written against the same verb as the exec check.
+	if err := enforceDestinations(ctx, s.terminalOptions.Enf, s.settingsMgr, project, destinationsNamed(a, podNode.Destination), rbac.ActionCreate); err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	config, err := s.getApplicationClusterRawConfig(ctx, a, podNode.Destination)
 	if err != nil {
 		http.Error(w, "Cannot get raw cluster config", http.StatusBadRequest)
 		return
@@ -188,18 +234,6 @@ func (s *terminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	kubeClientset, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		http.Error(w, "Cannot initialize kubeclient", http.StatusBadRequest)
-		return
-	}
-
-	resourceTree, err := s.appResourceTreeFn(ctx, a)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// From the tree find pods which match the given pod.
-	if !podExists(resourceTree.Nodes, podName, namespace) {
-		http.Error(w, "Pod doesn't belong to specified app", http.StatusBadRequest)
 		return
 	}
 
@@ -251,14 +285,28 @@ func (s *terminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	session.Close()
 }
 
-func podExists(treeNodes []appv1.ResourceNode, podName, namespace string) bool {
-	for _, treeNode := range treeNodes {
-		if treeNode.Kind == kube.PodKind && treeNode.Group == "" && treeNode.UID != "" &&
-			treeNode.Name == podName && treeNode.Namespace == namespace {
-			return true
+// findPodNode returns the pod's node in the application's resource tree, or nil when the pod is not
+// part of the application. destinationSelector narrows the search to one destination; an empty
+// selector matches any, so a client that does not send one still finds a pod that exists in only one
+// destination. A pod that exists in several is rejected rather than resolved to whichever came
+// first: opening a shell in the wrong cluster is worse than refusing to open one.
+func findPodNode(treeNodes []appv1.ResourceNode, podName, namespace, destinationSelector string) (*appv1.ResourceNode, error) {
+	var found *appv1.ResourceNode
+	for i := range treeNodes {
+		treeNode := &treeNodes[i]
+		if treeNode.Kind != kube.PodKind || treeNode.Group != "" || treeNode.UID == "" ||
+			treeNode.Name != podName || treeNode.Namespace != namespace {
+			continue
 		}
+		if !appv1.DestinationSelectorMatches(destinationSelector, treeNode.Destination) {
+			continue
+		}
+		if found != nil {
+			return nil, fmt.Errorf("pod %s/%s exists in more than one destination; specify which one", namespace, podName)
+		}
+		found = treeNode
 	}
-	return false
+	return found, nil
 }
 
 func containerRunning(pod *corev1.Pod, containerName string) bool {

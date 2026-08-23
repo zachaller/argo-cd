@@ -47,7 +47,7 @@ const PRIMARY_DESTINATION_SELECTOR = '@primary';
 // of an application's destinations resolves to the one being looked at, instead of being rejected as
 // ambiguous. For a single-destination application every node is in the primary, so this is exact
 // there too.
-function destinationSelector(resource: {destination?: string}): string {
+export function destinationSelector(resource: {destination?: string}): string {
     return resource.destination || PRIMARY_DESTINATION_SELECTOR;
 }
 

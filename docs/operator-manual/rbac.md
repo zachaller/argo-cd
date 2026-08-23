@@ -336,18 +336,21 @@ that declares no named destinations is unaffected by this resource no matter how
 
 The check is applied to the operations that reach a destination cluster or change which clusters an
 Application uses: `create`, `update` (including `argocd app set` and patch), `delete`, `sync`, `rollback`,
-terminating a running operation, and the resource-level operations (`get`, `patch`, `delete` and resource
-actions on an individual live resource).
+terminating a running operation, the resource-level operations (`get`, `patch`, `delete` and resource
+actions on an individual live resource), and opening a terminal into a pod.
 
 > [!NOTE]
 > A resource-level operation is checked against the destination the resource actually lives in. If the same
 > group, kind, namespace and name exists in more than one of the Application's destinations, the request is
 > rejected as ambiguous rather than resolved to one of them, because it does not say which cluster it means.
 
-> [!WARNING]
-> Opening a terminal into a pod (the `exec` resource) is **not** destination-checked. That path resolves its
-> cluster from `spec.destination` alone, so it cannot reach a pod in a named destination in the first place;
-> do not rely on a `destinations` policy to restrict it.
+Opening a terminal (the `exec` resource) is checked with the `create` action, the same verb as the `exec`
+check itself, against the destination the pod is in. Both must allow it:
+
+```csv
+p, example-user, exec, create, example-project/my-app, allow
+p, example-user, destinations, create, example-project/shared-services, allow
+```
 
 This resource is **not** enforced by default. Enable it in `argocd-cm`:
 
