@@ -8,8 +8,10 @@ import (
 	. "github.com/argoproj/argo-cd/gitops-engine/v3/pkg/sync/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/argoproj/argo-cd/v3/common"
 	. "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v3/test/e2e/fixture"
 	. "github.com/argoproj/argo-cd/v3/test/e2e/fixture/app"
@@ -70,6 +72,36 @@ func TestMultiDestinationPlacement(t *testing.T) {
 		// cluster's own API rather than from what Argo CD reports about itself. It is the fact this
 		// test exists to establish, and putting it after an expectation that waits for convergence
 		// would lose it entirely whenever convergence is what is broken.
+		// Every diagnostic below runs before anything can fail the test. An earlier version put a
+		// require.NoError among the placement assertions, which aborted the test at the first
+		// disagreement and threw away the logging that would have explained it.
+		And(func(app *Application) {
+			// Where each manifest actually is, in both clusters. Reading only the cluster a
+			// resource was meant for cannot distinguish "never applied" from "applied and then
+			// removed" from "applied to the wrong cluster", and the sync log shows each ConfigMap
+			// being created and then pruned within one operation.
+			t.Logf("second cluster  %s/second-cm:  %s", secondDestinationNamespace, second.DescribeConfigMap(t, secondDestinationNamespace, "second-cm"))
+			t.Logf("second cluster  %s/primary-cm: %s", secondDestinationNamespace, second.DescribeConfigMap(t, secondDestinationNamespace, "primary-cm"))
+			t.Logf("primary cluster %s/primary-cm: %s", ctx.DeploymentNamespace(), describePrimaryConfigMap(t, ctx.DeploymentNamespace(), "primary-cm"))
+			t.Logf("primary cluster %s/second-cm:  %s", secondDestinationNamespace, describePrimaryConfigMap(t, secondDestinationNamespace, "second-cm"))
+
+			// What the comparison attributes to which destination.
+			for _, res := range app.Status.Resources {
+				t.Logf("compared %s/%s destination=%q status=%s health=%v",
+					res.Namespace, res.Name, res.Destination, res.Status, res.Health)
+			}
+			// What the operation did, per destination. A resource that appears twice here -- once
+			// synced and once pruned -- is the shape of the failure being chased.
+			if opState := app.Status.OperationState; opState != nil && opState.SyncResult != nil {
+				for _, res := range opState.SyncResult.Resources {
+					t.Logf("synced %s/%s destination=%q status=%s hookPhase=%s message=%q",
+						res.Namespace, res.Name, res.Destination, res.Status, res.HookPhase, res.Message)
+				}
+			}
+			for _, cond := range app.Status.Conditions {
+				t.Logf("condition %s: %s", cond.Type, cond.Message)
+			}
+		}).
 		And(func(_ *Application) {
 			assert.True(t, second.HasConfigMap(t, secondDestinationNamespace, "second-cm"),
 				"the annotated manifest must land in the second destination's cluster")
@@ -77,19 +109,7 @@ func TestMultiDestinationPlacement(t *testing.T) {
 				"an unannotated manifest must not land in the second destination")
 
 			_, err := fixture.KubeClientset.CoreV1().ConfigMaps(ctx.DeploymentNamespace()).Get(t.Context(), "primary-cm", metav1.GetOptions{})
-			require.NoError(t, err, "the unannotated manifest must land in the primary destination")
-		}).
-		And(func(app *Application) {
-			// What each resource is attributed to and how it compares, recorded before the
-			// expectation below can time out. Without it a convergence failure says only that the
-			// Application is OutOfSync, not which destination's resource disagrees or how.
-			for _, res := range app.Status.Resources {
-				t.Logf("resource %s/%s destination=%q status=%s health=%v",
-					res.Namespace, res.Name, res.Destination, res.Status, res.Health)
-			}
-			for _, cond := range app.Status.Conditions {
-				t.Logf("condition %s: %s", cond.Type, cond.Message)
-			}
+			assert.NoError(t, err, "the unannotated manifest must land in the primary destination")
 		}).
 		Expect(SyncStatusIs(SyncStatusCodeSynced)).
 		Expect(HealthIs(health.HealthStatusHealthy))
@@ -173,4 +193,21 @@ func TestMultiDestinationDisabledByDefault(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "application.destinations.enabled")
 		})
+}
+
+// describePrimaryConfigMap reports whether a ConfigMap exists in the cluster Argo CD runs in and,
+// if it does, the resource-tracking annotation on it. It is the primary-cluster counterpart of
+// SecondCluster.DescribeConfigMap, so a test can say which cluster a resource reached rather than
+// only whether the cluster it was meant for has it.
+func describePrimaryConfigMap(t *testing.T, namespace, name string) string {
+	t.Helper()
+	cm, err := fixture.KubeClientset.CoreV1().ConfigMaps(namespace).Get(t.Context(), name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return "absent"
+	}
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	return fmt.Sprintf("present tracking-id=%q label-instance=%q",
+		cm.Annotations[common.AnnotationKeyAppInstance], cm.Labels[common.LabelKeyAppInstance])
 }

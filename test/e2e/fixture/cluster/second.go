@@ -131,6 +131,23 @@ func (c *SecondCluster) HasConfigMap(t *testing.T, namespace, name string) bool 
 	return false
 }
 
+// DescribeConfigMap reports whether the named ConfigMap exists in the second cluster and, if it
+// does, the resource-tracking annotation Argo CD stamped on it. The annotation is what decides
+// whether a live object is treated as this Application's own, so a placement failure that turns out
+// to be a tracking mismatch looks quite different from one where the object is simply absent.
+func (c *SecondCluster) DescribeConfigMap(t *testing.T, namespace, name string) string {
+	t.Helper()
+	cm, err := c.Client.CoreV1().ConfigMaps(namespace).Get(context.Background(), name, metav1.GetOptions{})
+	if errors.IsNotFound(err) {
+		return "absent"
+	}
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	return fmt.Sprintf("present tracking-id=%q label-instance=%q",
+		cm.Annotations[common.AnnotationKeyAppInstance], cm.Labels[common.LabelKeyAppInstance])
+}
+
 func waitForNamespaceGone(ctx context.Context, client kubernetes.Interface, namespace string) error {
 	for range 60 {
 		_, err := client.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
