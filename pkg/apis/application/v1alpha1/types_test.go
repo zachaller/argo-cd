@@ -6363,7 +6363,7 @@ func TestApplicationTreeFindNode(t *testing.T) {
 		t.Parallel()
 		tree := &ApplicationTree{Nodes: []ResourceNode{node("prod", "web"), node("", "api")}}
 
-		found, err := tree.FindNode("apps", "Deployment", "ns", "web")
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web", "")
 		require.NoError(t, err)
 		require.NotNil(t, found)
 		assert.Equal(t, "prod", found.Destination, "the caller routes to this cluster")
@@ -6373,7 +6373,7 @@ func TestApplicationTreeFindNode(t *testing.T) {
 		t.Parallel()
 		tree := &ApplicationTree{OrphanedNodes: []ResourceNode{node("prod", "web")}}
 
-		found, err := tree.FindNode("apps", "Deployment", "ns", "web")
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web", "")
 		require.NoError(t, err)
 		require.NotNil(t, found)
 		assert.Equal(t, "prod", found.Destination)
@@ -6383,7 +6383,7 @@ func TestApplicationTreeFindNode(t *testing.T) {
 		t.Parallel()
 		tree := &ApplicationTree{Nodes: []ResourceNode{node("prod", "web")}}
 
-		found, err := tree.FindNode("apps", "Deployment", "ns", "absent")
+		found, err := tree.FindNode("apps", "Deployment", "ns", "absent", "")
 		require.NoError(t, err)
 		assert.Nil(t, found)
 	})
@@ -6394,7 +6394,7 @@ func TestApplicationTreeFindNode(t *testing.T) {
 		// either node would act against a cluster the caller did not choose.
 		tree := &ApplicationTree{Nodes: []ResourceNode{node("prod", "web"), node("staging", "web")}}
 
-		found, err := tree.FindNode("apps", "Deployment", "ns", "web")
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web", "")
 		require.Error(t, err)
 		assert.Nil(t, found)
 		assert.Contains(t, err.Error(), "prod")
@@ -6406,9 +6406,9 @@ func TestApplicationTreeFindNode(t *testing.T) {
 		// It has no name of its own, so reporting an empty one would tell the user nothing.
 		tree := &ApplicationTree{Nodes: []ResourceNode{node("", "web"), node("prod", "web")}}
 
-		_, err := tree.FindNode("apps", "Deployment", "ns", "web")
+		_, err := tree.FindNode("apps", "Deployment", "ns", "web", "")
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "spec.destination")
+		assert.Contains(t, err.Error(), PrimaryDestinationSelector, "the error has to name something the caller can pass back")
 	})
 
 	t.Run("duplicates within one destination are not ambiguous", func(t *testing.T) {
@@ -6419,10 +6419,56 @@ func TestApplicationTreeFindNode(t *testing.T) {
 			OrphanedNodes: []ResourceNode{node("prod", "web")},
 		}
 
-		found, err := tree.FindNode("apps", "Deployment", "ns", "web")
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web", "")
 		require.NoError(t, err)
 		require.NotNil(t, found)
 		assert.Equal(t, "prod", found.Destination)
+	})
+
+	t.Run("a selector picks one of two otherwise ambiguous destinations", func(t *testing.T) {
+		t.Parallel()
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("prod", "web"), node("staging", "web")}}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web", "staging")
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, "staging", found.Destination)
+		assert.Equal(t, "staging-web", found.UID, "the node from the named destination, not merely one with the right name")
+	})
+
+	t.Run("the primary destination is selected by name, not by an empty selector", func(t *testing.T) {
+		t.Parallel()
+		// Empty means "no destination given", so the primary needs a selector of its own.
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("", "web"), node("prod", "web")}}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web", PrimaryDestinationSelector)
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, PrimaryDestinationName, found.Destination)
+		assert.Equal(t, "-web", found.UID)
+	})
+
+	t.Run("a selector naming no destination finds nothing rather than falling back", func(t *testing.T) {
+		t.Parallel()
+		// Falling back to another destination would act on a cluster the caller did not ask for.
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("prod", "web")}}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web", "staging")
+		require.NoError(t, err)
+		assert.Nil(t, found)
+	})
+
+	t.Run("a selector round-trips from the node it identifies", func(t *testing.T) {
+		t.Parallel()
+		// What a client echoes back after looking at a node has to select that same node.
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("", "web"), node("prod", "web")}}
+
+		for _, want := range []string{"", "prod"} {
+			found, err := tree.FindNode("apps", "Deployment", "ns", "web", DestinationSelectorFor(want))
+			require.NoError(t, err)
+			require.NotNil(t, found)
+			assert.Equal(t, want, found.Destination)
+		}
 	})
 }
 

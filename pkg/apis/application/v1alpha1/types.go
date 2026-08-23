@@ -2209,21 +2209,62 @@ type ApplicationSummary struct {
 	IsAppOfApps bool `json:"isAppOfApps,omitempty" protobuf:"bytes,3,opt,name=isAppOfApps"`
 }
 
+// PrimaryDestinationName is the name of the implicit destination backed by spec.destination.
+// Manifests without the argocd.argoproj.io/destination annotation are routed to it, and a resource
+// in it carries an empty destination throughout the API.
+const PrimaryDestinationName = ""
+
+// PrimaryDestinationSelector addresses the primary destination -- the one backed by
+// spec.destination -- in a request that selects a resource by destination.
+//
+// The primary destination has no name, so an empty selector cannot mean it: empty already means
+// "no destination given, resolve it if you can". '@' is reserved because a destination name may not
+// contain one, so this value can never collide with a name a user chose.
+const PrimaryDestinationSelector = "@primary"
+
+// DestinationSelectorMatches reports whether a node whose destination is nodeDestination is selected
+// by the given selector. An empty selector matches every destination, which is what a request that
+// does not mention one asks for.
+func DestinationSelectorMatches(selector string, nodeDestination string) bool {
+	switch selector {
+	case "":
+		return true
+	case PrimaryDestinationSelector:
+		return nodeDestination == PrimaryDestinationName
+	default:
+		return nodeDestination == selector
+	}
+}
+
+// DestinationSelectorFor returns the selector that addresses a node's own destination, which is what
+// a client echoes back when it wants to act on exactly the resource it is looking at.
+func DestinationSelectorFor(nodeDestination string) string {
+	if nodeDestination == PrimaryDestinationName {
+		return PrimaryDestinationSelector
+	}
+	return nodeDestination
+}
+
 // FindNode searches for a resource node in the application tree.
 // It looks for a node that matches the given group, kind, namespace, and name.
 // The search includes both directly managed nodes (`Nodes`) and orphaned nodes (`OrphanedNodes`).
 // Returns a pointer to the found node, or nil if no matching node is found.
 //
 // An Application that deploys to several destinations may legitimately hold the same group, kind,
-// namespace and name in more than one cluster, while a request identifies a resource without saying
-// which cluster it means. Returning whichever node came first would read or write against the wrong
-// cluster, so an ambiguous lookup is an error naming the destinations it matched.
-func (t *ApplicationTree) FindNode(group string, kind string, namespace string, name string) (*ResourceNode, error) {
+// namespace and name in more than one cluster, while a request may identify a resource without
+// saying which cluster it means. destinationSelector narrows the search to one destination --
+// PrimaryDestinationSelector for spec.destination, otherwise a name from spec.destinations. An empty
+// selector searches every destination, and a match in more than one is an error naming them rather
+// than whichever node came first, which would read or write against the wrong cluster.
+func (t *ApplicationTree) FindNode(group string, kind string, namespace string, name string, destinationSelector string) (*ResourceNode, error) {
 	var found *ResourceNode
 	var destinations []string
 	seen := map[string]bool{}
 	for _, n := range append(t.Nodes, t.OrphanedNodes...) {
 		if n.Group != group || n.Kind != kind || n.Namespace != namespace || n.Name != name {
+			continue
+		}
+		if !DestinationSelectorMatches(destinationSelector, n.Destination) {
 			continue
 		}
 		if found == nil {
@@ -2236,13 +2277,13 @@ func (t *ApplicationTree) FindNode(group string, kind string, namespace string, 
 	}
 	if len(destinations) > 1 {
 		for i, d := range destinations {
-			if d == "" {
-				// The primary destination has no name; naming the field is what a user can act on.
-				destinations[i] = "spec.destination"
+			if d == PrimaryDestinationName {
+				// The primary destination has no name; the selector is what a user can act on.
+				destinations[i] = PrimaryDestinationSelector
 			}
 		}
 		sort.Strings(destinations)
-		return nil, fmt.Errorf("%s/%s %s/%s exists in more than one destination of this application (%s); it cannot be addressed without naming one",
+		return nil, fmt.Errorf("%s/%s %s/%s exists in more than one destination of this application (%s); pass one of them as the destination to choose",
 			group, kind, namespace, name, strings.Join(destinations, ", "))
 	}
 	return found, nil

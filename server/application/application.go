@@ -1611,7 +1611,7 @@ func (s *Server) getAppLiveResource(ctx context.Context, action string, q *appli
 		return nil, nil, nil, fmt.Errorf("error getting app resources: %w", err)
 	}
 
-	found, err := tree.FindNode(q.GetGroup(), q.GetKind(), q.GetNamespace(), q.GetResourceName())
+	found, err := tree.FindNode(q.GetGroup(), q.GetKind(), q.GetNamespace(), q.GetResourceName(), q.GetDestination())
 	if err != nil {
 		return nil, nil, nil, status.Error(codes.InvalidArgument, err.Error())
 	}
@@ -1682,6 +1682,7 @@ func (s *Server) PatchResource(ctx context.Context, q *application.ApplicationRe
 		Version:      q.Version,
 		Group:        q.Group,
 		Project:      q.Project,
+		Destination:  q.Destination,
 	}
 	res, config, a, err := s.getAppLiveResource(ctx, rbac.ActionUpdate, resourceRequest)
 	if err != nil {
@@ -1725,6 +1726,7 @@ func (s *Server) DeleteResource(ctx context.Context, q *application.ApplicationR
 		Version:      q.Version,
 		Group:        q.Group,
 		Project:      q.Project,
+		Destination:  q.Destination,
 	}
 	res, config, a, err := s.getAppLiveResource(ctx, rbac.ActionDelete, resourceRequest)
 	if err != nil {
@@ -2804,6 +2806,7 @@ func (s *Server) RunResourceAction(ctx context.Context, q *application.ResourceA
 		Group:        q.Group,
 		Action:       q.Action,
 		Project:      q.Project,
+		Destination:  q.Destination,
 	}
 	return s.RunResourceActionV2(ctx, qV2)
 }
@@ -2818,6 +2821,7 @@ func (s *Server) RunResourceActionV2(ctx context.Context, q *application.Resourc
 		Version:      q.Version,
 		Group:        q.Group,
 		Project:      q.Project,
+		Destination:  q.Destination,
 	}
 	actionRequest := fmt.Sprintf("%s/%s/%s/%s", rbac.ActionAction, q.GetGroup(), q.GetKind(), q.GetAction())
 	liveObj, res, a, config, err := s.getUnstructuredLiveResourceOrApp(ctx, actionRequest, resourceRequest)

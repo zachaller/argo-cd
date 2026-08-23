@@ -1293,6 +1293,12 @@
             "type": "string",
             "name": "project",
             "in": "query"
+          },
+          {
+            "type": "string",
+            "description": "destination selects which of the application's destinations the resource is in. Empty resolves\nit automatically, which fails when the same resource exists in more than one. \"@primary\"\naddresses spec.destination; any other value names an entry in spec.destinations.",
+            "name": "destination",
+            "in": "query"
           }
         ],
         "responses": {
@@ -1370,6 +1376,12 @@
             "type": "string",
             "name": "project",
             "in": "query"
+          },
+          {
+            "type": "string",
+            "description": "destination selects which of the application's destinations the resource is in. Empty resolves\nit automatically, which fails when the same resource exists in more than one. \"@primary\"\naddresses spec.destination; any other value names an entry in spec.destinations.",
+            "name": "destination",
+            "in": "query"
           }
         ],
         "responses": {
@@ -1444,6 +1456,12 @@
             "type": "string",
             "name": "project",
             "in": "query"
+          },
+          {
+            "type": "string",
+            "description": "destination selects which of the application's destinations the resource is in. Empty resolves\nit automatically, which fails when the same resource exists in more than one. \"@primary\"\naddresses spec.destination; any other value names an entry in spec.destinations.",
+            "name": "destination",
+            "in": "query"
           }
         ],
         "responses": {
@@ -1509,6 +1527,12 @@
           {
             "type": "string",
             "name": "project",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "description": "destination selects which of the application's destinations the resource is in. Empty resolves\nit automatically, which fails when the same resource exists in more than one. \"@primary\"\naddresses spec.destination; any other value names an entry in spec.destinations.",
+            "name": "destination",
             "in": "query"
           }
         ],
@@ -1582,6 +1606,12 @@
           {
             "type": "string",
             "name": "project",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "description": "destination selects which of the application's destinations the resource is in. Empty resolves\nit automatically, which fails when the same resource exists in more than one. \"@primary\"\naddresses spec.destination; any other value names an entry in spec.destinations.",
+            "name": "destination",
             "in": "query"
           }
         ],
@@ -1687,6 +1717,12 @@
           {
             "type": "string",
             "name": "project",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "description": "destination selects which of the application's destinations the resource is in. Empty resolves\nit automatically, which fails when the same resource exists in more than one. \"@primary\"\naddresses spec.destination; any other value names an entry in spec.destinations.",
+            "name": "destination",
             "in": "query"
           }
         ],
@@ -5427,6 +5463,10 @@
           "type": "string"
         },
         "appNamespace": {
+          "type": "string"
+        },
+        "destination": {
+          "description": "destination selects which of the application's destinations the resource is in. Empty resolves\nit automatically, which fails when the same resource exists in more than one. \"@primary\"\naddresses spec.destination; any other value names an entry in spec.destinations.",
           "type": "string"
         },
         "group": {

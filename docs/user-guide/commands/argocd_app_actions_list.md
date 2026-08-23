@@ -19,6 +19,7 @@ argocd app actions list APPNAME [flags]
 
 ```
   -N, --app-namespace string   Namespace of the application
+      --destination string     Destination the resource is in, when the application deploys to more than one and the same resource exists in several. Use "@primary" for spec.destination, otherwise a name from spec.destinations
       --group string           Group
   -h, --help                   help for list
       --kind string            Kind
