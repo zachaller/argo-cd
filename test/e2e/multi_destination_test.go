@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/health"
+	. "github.com/argoproj/argo-cd/gitops-engine/v3/pkg/sync/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -61,10 +62,14 @@ func TestMultiDestinationPlacement(t *testing.T) {
 		When().
 		Sync().
 		Then().
-		// Where the resources landed is asserted first, and read from each cluster's own API rather
-		// than from what Argo CD reports. It is the fact this test exists to establish, and it is
-		// answerable the moment the sync has applied; putting it after an expectation that waits for
-		// convergence would lose it entirely whenever convergence is what is broken.
+		// Wait for the sync operation itself to finish, but not for the Application to report
+		// Synced. And() runs immediately while Expect() polls, so asserting placement without this
+		// would check for resources the sync had not applied yet.
+		Expect(OperationPhaseIs(OperationSucceeded)).
+		// Where the resources landed is then asserted before convergence, and read from each
+		// cluster's own API rather than from what Argo CD reports about itself. It is the fact this
+		// test exists to establish, and putting it after an expectation that waits for convergence
+		// would lose it entirely whenever convergence is what is broken.
 		And(func(_ *Application) {
 			assert.True(t, second.HasConfigMap(t, secondDestinationNamespace, "second-cm"),
 				"the annotated manifest must land in the second destination's cluster")
