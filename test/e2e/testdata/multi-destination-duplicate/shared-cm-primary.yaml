@@ -1,0 +1,8 @@
+# The same ConfigMap name as its counterpart in the second destination. The two are distinguishable
+# only by the destination they are routed to, which is the case the destination selector exists for.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shared-cm
+data:
+  destination: primary

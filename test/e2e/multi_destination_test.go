@@ -22,6 +22,10 @@ import (
 const (
 	multiDestinationPath           = "multi-destination"
 	multiDestinationUndeclaredPath = "multi-destination-undeclared"
+	// Both manifests here are named shared-cm. Routed to different destinations but into the same
+	// namespace name, they differ only by destination -- the case a resource-level request cannot
+	// resolve without being told which one it means.
+	multiDestinationDuplicatePath = "multi-destination-duplicate"
 	// The namespace in the second cluster. It is deliberately not the deployment namespace of the
 	// primary destination: a test that used the same name in both clusters could not tell a
 	// resource that landed in the right place from one that landed in the wrong cluster.
@@ -210,4 +214,87 @@ func describePrimaryConfigMap(t *testing.T, namespace, name string) string {
 	}
 	return fmt.Sprintf("present tracking-id=%q label-instance=%q",
 		cm.Annotations[common.AnnotationKeyAppInstance], cm.Labels[common.LabelKeyAppInstance])
+}
+
+// TestMultiDestinationAddressDuplicateResource covers the case the destination selector exists for:
+// the same group, kind, namespace and name in two of an Application's destinations. Reaching either
+// copy needs the request to name a destination, because nothing else distinguishes them.
+//
+// The two destinations deliberately share a namespace NAME here. Everywhere else in this file they
+// differ, which keeps those tests honest about placement but means a lookup by namespace alone is
+// already unambiguous -- so none of them exercise this.
+func TestMultiDestinationAddressDuplicateResource(t *testing.T) {
+	// Order matters: Given empties argocd-cm as part of cleaning state, so the feature gate has to
+	// be set after it, and the second cluster registered without cleaning state again.
+	ctx := Given(t)
+	enableMultiDestination(t)
+	second := clusterFixture.EnsureSecondCluster(t, ctx)
+	// The same namespace name in the second cluster as the Application deploys to in the primary.
+	sharedNamespace := ctx.DeploymentNamespace()
+	second.RecreateNamespace(t, sharedNamespace)
+
+	ctx.
+		Path(multiDestinationDuplicatePath).
+		When().
+		CreateApp("--dest", fmt.Sprintf("name=second,server=%s,namespace=%s", second.Server, sharedNamespace)).
+		Sync().
+		Then().
+		Expect(OperationPhaseIs(OperationSucceeded)).
+		Expect(SyncStatusIs(SyncStatusCodeSynced)).
+		And(func(_ *Application) {
+			// Both copies exist, in different clusters, under the same namespace and name.
+			primary, err := fixture.KubeClientset.CoreV1().ConfigMaps(sharedNamespace).Get(t.Context(), "shared-cm", metav1.GetOptions{})
+			require.NoError(t, err, "the unannotated manifest belongs in the primary destination")
+			assert.Equal(t, "primary", primary.Data["destination"])
+
+			other, err := second.Client.CoreV1().ConfigMaps(sharedNamespace).Get(t.Context(), "shared-cm", metav1.GetOptions{})
+			require.NoError(t, err, "the annotated manifest belongs in the second destination")
+			assert.Equal(t, "second", other.Data["destination"])
+		}).
+		And(func(app *Application) {
+			appName := app.Name
+
+			// Reading without a destination returns every copy: the command walks the resource tree
+			// and asks for each node by its own destination, so there is nothing to disambiguate.
+			out, err := fixture.RunCli("app", "get-resource", appName, "--kind", "ConfigMap", "--resource-name", "shared-cm", "-o", "yaml")
+			require.NoError(t, err)
+			assert.Contains(t, out, "destination: primary")
+			assert.Contains(t, out, "destination: second")
+
+			// Naming one narrows it to that destination.
+			out, err = fixture.RunCli("app", "get-resource", appName, "--kind", "ConfigMap", "--resource-name", "shared-cm", "--destination", "second", "-o", "yaml")
+			require.NoError(t, err)
+			assert.Contains(t, out, "destination: second")
+			assert.NotContains(t, out, "destination: primary")
+
+			// The primary destination has no name of its own, so it is addressed by the selector.
+			out, err = fixture.RunCli("app", "get-resource", appName, "--kind", "ConfigMap", "--resource-name", "shared-cm", "--destination", PrimaryDestinationSelector, "-o", "yaml")
+			require.NoError(t, err)
+			assert.Contains(t, out, "destination: primary")
+			assert.NotContains(t, out, "destination: second")
+		}).
+		And(func(app *Application) {
+			appName := app.Name
+
+			// Writing is where the ambiguity has to be refused. Without a destination the command
+			// cannot choose, and --all is not the answer: it would patch the copy in both clusters.
+			_, err := fixture.RunCli("app", "patch-resource", appName, "--kind", "ConfigMap", "--resource-name", "shared-cm",
+				"--patch", `{"data":{"patched":"yes"}}`, "--patch-type", "application/merge-patch+json")
+			require.Error(t, err, "two copies match, so the command must not pick one")
+			assert.Contains(t, err.Error(), "multiple resources match")
+
+			// With a destination it patches exactly that copy.
+			_, err = fixture.RunCli("app", "patch-resource", appName, "--kind", "ConfigMap", "--resource-name", "shared-cm",
+				"--destination", "second",
+				"--patch", `{"data":{"patched":"yes"}}`, "--patch-type", "application/merge-patch+json")
+			require.NoError(t, err)
+
+			other, err := second.Client.CoreV1().ConfigMaps(sharedNamespace).Get(t.Context(), "shared-cm", metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, "yes", other.Data["patched"], "the named destination's copy is the one that changed")
+
+			primary, err := fixture.KubeClientset.CoreV1().ConfigMaps(sharedNamespace).Get(t.Context(), "shared-cm", metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.NotContains(t, primary.Data, "patched", "the other cluster's copy must be untouched")
+		})
 }
