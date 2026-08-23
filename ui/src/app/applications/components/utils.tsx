@@ -30,12 +30,40 @@ export interface NodeId {
     name: string;
     group: string;
     createdAt?: models.Time;
+    destination?: string;
 }
 
 type ActionMenuItem = MenuItem & {disabled?: boolean; tooltip?: string};
 
+/**
+ * Separates a resource's name from the destination it belongs to inside a node key. '@' is used
+ * because a Kubernetes object name cannot contain one, and because the key must stay at exactly four
+ * '/'-separated segments: NodeInfo reads the container index from parts[4], so a destination added as
+ * a fifth segment would be parsed as that index instead.
+ */
+export const nodeDestinationSeparator = '@';
+
+/**
+ * Identifies a resource within an application. With more than one destination the same
+ * group/kind/namespace/name can exist in two clusters, so the destination is part of the identity:
+ * without it the two collide as React keys and, more seriously, overwrite each other in the maps
+ * that resolve parent references.
+ *
+ * A resource in the primary destination has no destination name and so keeps exactly the key it had
+ * before, which is what keeps existing deep links working.
+ */
 export function nodeKey(node: NodeId) {
-    return [node.group, node.kind, node.namespace, node.name].join('/');
+    const name = node.destination ? `${node.name}${nodeDestinationSeparator}${node.destination}` : node.name;
+    return [node.group, node.kind, node.namespace, name].join('/');
+}
+
+/** Splits the name segment of a node key back into the resource name and its destination. */
+export function parseNodeName(segment: string): {name: string; destination: string} {
+    const at = segment.indexOf(nodeDestinationSeparator);
+    if (at < 0) {
+        return {name: segment, destination: ''};
+    }
+    return {name: segment.slice(0, at), destination: segment.slice(at + 1)};
 }
 
 // Convert ResourceStatus to ResourceNode for orphaned resources
