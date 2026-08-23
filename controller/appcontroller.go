@@ -1338,11 +1338,29 @@ func (ctrl *ApplicationController) getPermittedAppLiveObjects(destCluster *appv1
 	return objsMap, nil
 }
 
+// permittedLiveObjectsByDestination gathers the application's permitted live objects in every
+// destination, keyed by destination name, so a delete hook stage acts on the objects that are
+// actually in the cluster it is about to touch.
+func (ctrl *ApplicationController) permittedLiveObjectsByDestination(dests []deletionDestination, app *appv1.Application, proj *appv1.AppProject, projectClusters func(project string) ([]*appv1.Cluster, error)) (map[string]map[kube.ResourceKey]*unstructured.Unstructured, error) {
+	objs := make(map[string]map[kube.ResourceKey]*unstructured.Unstructured, len(dests))
+	for _, dest := range dests {
+		objsMap, err := ctrl.getPermittedAppLiveObjects(dest.cluster, app, proj, projectClusters)
+		if err != nil {
+			return nil, err
+		}
+		objs[dest.name] = objsMap
+	}
+	return objs, nil
+}
+
 // deletionDestination is one cluster an application's resources have to be removed from.
 type deletionDestination struct {
 	name    string
 	cluster *appv1.Cluster
 	config  *rest.Config
+	// namespace is the destination's own namespace, used to default and track the delete hooks
+	// created in it.
+	namespace string
 }
 
 // resolveDeletionDestinations resolves every destination the application declares, skipping any that
@@ -1375,7 +1393,7 @@ func (ctrl *ApplicationController) resolveDeletionDestinations(ctx context.Conte
 		if err := ctrl.applyImpersonationConfig(config, proj, app, cluster); err != nil {
 			return nil, fmt.Errorf("cannot apply impersonation: %w", err)
 		}
-		dests = append(dests, deletionDestination{name: named.Name, cluster: cluster, config: config})
+		dests = append(dests, deletionDestination{name: named.Name, cluster: cluster, config: config, namespace: destination.Namespace})
 	}
 	return dests, nil
 }
@@ -1415,31 +1433,18 @@ func (ctrl *ApplicationController) finalizeApplicationDeletion(ctx context.Conte
 		return nil
 	}
 
-	// Delete hooks run in the primary destination, where they were created. They are rendered from
-	// the application's manifests like any other resource, so routing them by the destination
-	// annotation is possible but is a separate change; today they are not partitioned.
-	primary := dests[0]
-	if primary.name != argo.PrimaryDestinationName {
-		// The primary destination is gone, so its hooks can neither run nor be cleaned up. Drop
-		// their finalizers -- what an unresolvable destination has always done -- rather than
-		// leaving the application stuck behind a hook that can never complete, and carry on
-		// removing the resources in the destinations that are still reachable.
-		logCtx.Warn("Primary destination is unresolvable; removing delete hook finalizers")
-		app.UnSetPostDeleteFinalizerAll()
-		app.UnSetPreDeleteFinalizerAll()
-		if err := ctrl.updateFinalizers(app); err != nil {
-			return err
-		}
-	}
-
-	// Handle PreDelete hooks - run them before any deletion occurs
+	// Handle PreDelete hooks - run them before any deletion occurs. Hooks are routed to the
+	// destination their annotation names, so they run in the cluster their siblings were applied
+	// to; a hook whose destination no longer resolves is skipped rather than run against another
+	// cluster, which keeps an unreachable destination from stranding the application behind a hook
+	// that can never complete.
 	if app.HasPreDeleteFinalizer() {
-		objsMap, err := ctrl.getPermittedAppLiveObjects(primary.cluster, app, proj, projectClusters)
+		objsMap, err := ctrl.permittedLiveObjectsByDestination(dests, app, proj, projectClusters)
 		if err != nil {
 			return fmt.Errorf("error getting permitted app live objects: %w", err)
 		}
 
-		done, err := ctrl.executePreDeleteHooks(ctx, app, proj, objsMap, primary.config, logCtx)
+		done, err := ctrl.executePreDeleteHooks(ctx, app, proj, dests, objsMap, logCtx)
 		if err != nil {
 			return fmt.Errorf("error executing pre-delete hooks: %w", err)
 		}
@@ -1529,12 +1534,12 @@ func (ctrl *ApplicationController) finalizeApplicationDeletion(ctx context.Conte
 	}
 
 	if app.HasPostDeleteFinalizer() {
-		objsMap, err := ctrl.getPermittedAppLiveObjects(primary.cluster, app, proj, projectClusters)
+		objsMap, err := ctrl.permittedLiveObjectsByDestination(dests, app, proj, projectClusters)
 		if err != nil {
 			return err
 		}
 
-		done, err := ctrl.executePostDeleteHooks(ctx, app, proj, objsMap, primary.config, logCtx)
+		done, err := ctrl.executePostDeleteHooks(ctx, app, proj, dests, objsMap, logCtx)
 		if err != nil {
 			return err
 		}
@@ -1546,12 +1551,12 @@ func (ctrl *ApplicationController) finalizeApplicationDeletion(ctx context.Conte
 	}
 
 	if app.HasPreDeleteFinalizer("cleanup") {
-		objsMap, err := ctrl.getPermittedAppLiveObjects(primary.cluster, app, proj, projectClusters)
+		objsMap, err := ctrl.permittedLiveObjectsByDestination(dests, app, proj, projectClusters)
 		if err != nil {
 			return fmt.Errorf("error getting permitted app live objects for pre-delete cleanup: %w", err)
 		}
 
-		done, err := ctrl.cleanupPreDeleteHooks(ctx, objsMap, primary.config, logCtx)
+		done, err := ctrl.cleanupPreDeleteHooks(ctx, dests, objsMap, logCtx)
 		if err != nil {
 			return fmt.Errorf("error cleaning up pre-delete hooks: %w", err)
 		}
@@ -1563,12 +1568,12 @@ func (ctrl *ApplicationController) finalizeApplicationDeletion(ctx context.Conte
 	}
 
 	if app.HasPostDeleteFinalizer("cleanup") {
-		objsMap, err := ctrl.getPermittedAppLiveObjects(primary.cluster, app, proj, projectClusters)
+		objsMap, err := ctrl.permittedLiveObjectsByDestination(dests, app, proj, projectClusters)
 		if err != nil {
 			return err
 		}
 
-		done, err := ctrl.cleanupPostDeleteHooks(ctx, objsMap, primary.config, logCtx)
+		done, err := ctrl.cleanupPostDeleteHooks(ctx, dests, objsMap, logCtx)
 		if err != nil {
 			return err
 		}

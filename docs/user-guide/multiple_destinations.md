@@ -154,22 +154,42 @@ A destination whose cluster can no longer be resolved is skipped with a warning 
 the deletion — its resources went with the cluster, and refusing to proceed would strand the
 resources still reachable elsewhere.
 
+`PreDelete` and `PostDelete` hooks are routed by the `argocd.argoproj.io/destination` annotation like
+any other manifest: each hook is created, waited on and cleaned up in the destination it names, and a
+hook without the annotation runs in `spec.destination`. A hook manifest that declares no namespace
+takes the namespace of the destination it is routed to.
+
+The deletion waits for every destination's hooks before it continues, so a hook still running in one
+cluster holds the whole deletion. A failed hook is deleted in each destination it failed in, so the
+next attempt starts clean everywhere.
+
 > [!NOTE]
-> `PreDelete` and `PostDelete` hooks run in the primary destination, where they were created. They
-> are not routed by the `argocd.argoproj.io/destination` annotation.
+> A hook annotated for a destination whose cluster can no longer be resolved is skipped with a
+> warning. It is never run in another destination -- a delete hook written for one cluster is not
+> safe to run against a different one -- and it does not block the deletion of the destinations that
+> are still reachable.
 
-## Limitation: addressing a resource that exists in two destinations
+## Addressing a resource that exists in two destinations
 
-Argo CD identifies a live resource by its group, kind, namespace and name. An Application whose
-destinations hold the same four values in more than one cluster cannot say which one it means, so
-operations that act on an individual live resource -- viewing or patching its manifest, deleting it,
-running a resource action, reading its events -- are rejected as ambiguous.
+Argo CD identifies a live resource by its group, kind, namespace and name. When an Application's
+destinations hold the same four values in more than one cluster, name the destination as well:
+
+```bash
+argocd app get-resource my-app --kind ConfigMap --resource-name shared-cm --destination second
+argocd app patch-resource my-app --kind ConfigMap --resource-name shared-cm --destination second \
+  --patch '{"data":{"key":"value"}}' --patch-type application/merge-patch+json
+```
+
+`--destination` takes a name from `spec.destinations`, or `@primary` for `spec.destination`. It is
+accepted by `get-resource`, `patch-resource`, `delete-resource`, `actions list` and `actions run`, and
+the UI sends it automatically for the resource you selected in the tree.
+
+Without it, a request that matches the same resource in more than one destination is rejected as
+ambiguous rather than acting on whichever copy was found first.
 
 Everything that treats the Application as a whole is unaffected: sync, diff, health, the resource tree
-and pod logs all handle such resources normally, each against its own cluster.
-
-Give the resources distinct namespaces, or split them across Applications, if you need to address them
-individually.
+and pod logs all handle such resources normally, each against its own cluster. Resource events are
+matched by UID, which is already unique per cluster, so they need no destination.
 
 ## Limitation: manifests are generated once
 

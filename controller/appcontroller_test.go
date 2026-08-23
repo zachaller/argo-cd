@@ -102,10 +102,14 @@ type MockKubectl struct {
 	// so a test can tell which cluster a resource was removed from.
 	DeletedFromHosts []string
 	CreatedResources []*unstructured.Unstructured
+	// CreatedOnHosts records the API server each create was sent to, parallel to CreatedResources,
+	// so a test can tell which cluster a delete hook was created in.
+	CreatedOnHosts []string
 }
 
 func (m *MockKubectl) CreateResource(ctx context.Context, config *rest.Config, gvk schema.GroupVersionKind, name string, namespace string, obj *unstructured.Unstructured, createOptions metav1.CreateOptions, subresources ...string) (*unstructured.Unstructured, error) {
 	m.CreatedResources = append(m.CreatedResources, obj)
+	m.CreatedOnHosts = append(m.CreatedOnHosts, config.Host)
 	return m.Kubectl.CreateResource(ctx, config, gvk, name, namespace, obj, createOptions, subresources...)
 }
 
@@ -513,6 +517,45 @@ var fakePreDeleteHook = `
         ]
       }
     ]
+  }
+}
+`
+
+// fakeSecondDestinationPostDeleteHook is a PostDelete hook routed to a named destination. It
+// declares no namespace, so the namespace it is created with proves it was defaulted from the
+// destination it was routed to rather than from spec.destination.
+var fakeSecondDestinationPostDeleteHook = `
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {
+    "name": "second-post-delete-hook",
+    "annotations": {
+      "argocd.argoproj.io/hook": "PostDelete",
+      "argocd.argoproj.io/hook-delete-policy": "HookSucceeded",
+      "argocd.argoproj.io/destination": "second"
+    }
+  },
+  "spec": {
+    "template": {
+      "metadata": {
+        "name": "second-post-delete-hook"
+      },
+      "spec": {
+        "containers": [
+          {
+            "name": "second-post-delete-hook",
+            "image": "busybox",
+            "command": [
+              "sh",
+              "-c",
+              "sleep 1"
+            ]
+          }
+        ],
+        "restartPolicy": "Never"
+      }
+    }
   }
 }
 `
@@ -1065,6 +1108,23 @@ func TestAutoSyncParameterOverrides(t *testing.T) {
 }
 
 // TestFinalizeAppDeletion verifies application deletion
+// newSecondClusterSecret returns a cluster secret for a second destination, so a test can give an
+// application destinations that resolve to genuinely different clusters.
+func newSecondClusterSecret() *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "second-cluster-secret",
+			Namespace: test.FakeArgoCDNamespace,
+			Labels:    map[string]string{"argocd.argoproj.io/secret-type": "cluster"},
+		},
+		Data: map[string][]byte{
+			"name":   []byte("second"),
+			"server": []byte("https://second.example.com"),
+			"config": []byte(`{"bearerToken":"fake","tlsClientConfig":{"insecure":true},"awsAuthConfig":null}`),
+		},
+	}
+}
+
 func TestFinalizeAppDeletion(t *testing.T) {
 	now := metav1.Now()
 	defaultProj := v1alpha1.AppProject{
@@ -1174,18 +1234,7 @@ func TestFinalizeAppDeletion(t *testing.T) {
 	// Resources routed to a named destination live in that cluster, and nothing else will ever
 	// remove them, so deletion has to reach every destination the application declares.
 	t.Run("CascadingDeleteAcrossDestinations", func(t *testing.T) {
-		secondCluster := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "second-cluster-secret",
-				Namespace: test.FakeArgoCDNamespace,
-				Labels:    map[string]string{"argocd.argoproj.io/secret-type": "cluster"},
-			},
-			Data: map[string][]byte{
-				"name":   []byte("second"),
-				"server": []byte("https://second.example.com"),
-				"config": []byte(`{"bearerToken":"fake","tlsClientConfig":{"insecure":true},"awsAuthConfig":null}`),
-			},
-		}
+		secondCluster := newSecondClusterSecret()
 
 		app := newFakeApp()
 		app.SetCascadedDeletion(v1alpha1.ResourcesFinalizerName)
@@ -1588,6 +1637,119 @@ func TestFinalizeAppDeletion(t *testing.T) {
 		require.ElementsMatch(t, expectedNames, deletedResources, "Deleted resources should match expected names")
 		// finalizer is not removed
 		assert.False(t, patched)
+	})
+
+	// A delete hook is a manifest like any other: it belongs in the destination its annotation
+	// names. Running every hook in the primary destination would run it against a cluster whose
+	// resources it was never written for.
+	t.Run("PostDelete_HookRunsInAnnotatedDestination", func(t *testing.T) {
+		app := newFakeApp()
+		app.SetPostDeleteFinalizer()
+		app.Spec.Destination.Namespace = test.FakeArgoCDNamespace
+		app.Spec.Destinations = []v1alpha1.NamedDestination{
+			{Name: "second", Server: "https://second.example.com", Namespace: "second"},
+		}
+		ctrl := newFakeController(t.Context(), &fakeData{
+			manifestResponses: []*apiclient.ManifestResponse{{
+				Manifests: []string{fakePostDeleteHook, fakeSecondDestinationPostDeleteHook},
+			}},
+			apps:            []runtime.Object{app, &defaultProj},
+			additionalObjs:  []runtime.Object{newSecondClusterSecret()},
+			managedLiveObjs: map[kube.ResourceKey]*unstructured.Unstructured{},
+		}, nil)
+
+		fakeAppCs := ctrl.applicationClientset.(*appclientset.Clientset)
+		defaultReactor := fakeAppCs.ReactionChain[0]
+		fakeAppCs.ReactionChain = nil
+		fakeAppCs.AddReactor("get", "*", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+			return defaultReactor.React(action)
+		})
+		fakeAppCs.AddReactor("patch", "*", func(_ kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+			return true, &v1alpha1.Application{}, nil
+		})
+		err := ctrl.finalizeApplicationDeletion(t.Context(), app, func(_ string) ([]*v1alpha1.Cluster, error) {
+			return []*v1alpha1.Cluster{}, nil
+		})
+		require.NoError(t, err)
+
+		kubectl := ctrl.kubectl.(*MockKubectl)
+		require.Len(t, kubectl.CreatedResources, 2)
+		createdOn := map[string]string{}
+		createdIn := map[string]string{}
+		for i, obj := range kubectl.CreatedResources {
+			createdOn[obj.GetName()] = kubectl.CreatedOnHosts[i]
+			createdIn[obj.GetName()] = obj.GetNamespace()
+		}
+		assert.Equal(t, map[string]string{
+			"post-delete-hook":        "https://localhost:6443",
+			"second-post-delete-hook": "https://second.example.com",
+		}, createdOn, "each hook must be created in the cluster its destination annotation names")
+		assert.Equal(t, "second", createdIn["second-post-delete-hook"],
+			"a hook without a namespace must default to its own destination's namespace")
+	})
+
+	// Cleanup has to reach every destination too: a hook left behind in a named destination is
+	// never removed by anything else once the application is gone.
+	t.Run("PostDelete_HooksCleanedUpInEveryDestination", func(t *testing.T) {
+		app := newFakeApp()
+		app.SetPostDeleteFinalizer("cleanup")
+		app.Spec.Destination.Namespace = test.FakeArgoCDNamespace
+		app.Spec.Destinations = []v1alpha1.NamedDestination{
+			{Name: "second", Server: "https://second.example.com", Namespace: "second"},
+		}
+
+		completed := func(hook *unstructured.Unstructured) *unstructured.Unstructured {
+			conditions := []any{
+				map[string]any{
+					"type":   "Complete",
+					"status": "True",
+				},
+			}
+			require.NoError(t, unstructured.SetNestedField(hook.Object, conditions, "status", "conditions"))
+			return hook
+		}
+
+		primaryHook := completed(&unstructured.Unstructured{Object: newFakePostDeleteHook()})
+		secondHook := completed(&unstructured.Unstructured{Object: newFakePostDeleteHook()})
+		secondHook.SetName("second-post-delete-hook")
+		secondHook.SetNamespace("second")
+
+		ctrl := newFakeController(t.Context(), &fakeData{
+			apps:           []runtime.Object{app, &defaultProj},
+			additionalObjs: []runtime.Object{newSecondClusterSecret()},
+			managedLiveObjsByCluster: map[string]map[kube.ResourceKey]*unstructured.Unstructured{
+				"https://localhost:6443": {
+					kube.GetResourceKey(primaryHook): primaryHook,
+				},
+				"https://second.example.com": {
+					kube.GetResourceKey(secondHook): secondHook,
+				},
+			},
+		}, nil)
+
+		fakeAppCs := ctrl.applicationClientset.(*appclientset.Clientset)
+		defaultReactor := fakeAppCs.ReactionChain[0]
+		fakeAppCs.ReactionChain = nil
+		fakeAppCs.AddReactor("get", "*", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+			return defaultReactor.React(action)
+		})
+		fakeAppCs.AddReactor("patch", "*", func(_ kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+			return true, &v1alpha1.Application{}, nil
+		})
+		err := ctrl.finalizeApplicationDeletion(t.Context(), app, func(_ string) ([]*v1alpha1.Cluster, error) {
+			return []*v1alpha1.Cluster{}, nil
+		})
+		require.NoError(t, err)
+
+		kubectl := ctrl.kubectl.(*MockKubectl)
+		deletedOn := map[string]string{}
+		for i, res := range kubectl.DeletedResources {
+			deletedOn[res.Name] = kubectl.DeletedFromHosts[i]
+		}
+		assert.Equal(t, map[string]string{
+			"post-delete-hook":        "https://localhost:6443",
+			"second-post-delete-hook": "https://second.example.com",
+		}, deletedOn, "each destination's hooks must be cleaned up in its own cluster")
 	})
 
 	// Ensure cache is cleared using correct key (InstanceName) for apps in different namespace
