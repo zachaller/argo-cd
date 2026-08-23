@@ -721,6 +721,17 @@ jobs:
           make test-e2e-local
           goreman run stop-all || echo "goreman trouble"
           sleep 30
+      - name: Print controller log for the multi-destination tests
+        # TEMPORARY -- REVERT BEFORE MERGE, together with the two env vars above.
+        # The controller log is uploaded as an artifact, but an artifact cannot be read while
+        # iterating from outside the runner. This puts the lines for the tests under investigation
+        # into the job log, where they can be. It runs only on failure and greps rather than dumping
+        # the whole file, so a green run costs nothing.
+        if: ${{ failure() }}
+        run: |
+          echo "::group::controller log (multi-destination)"
+          grep -iE "multi-destination|destination=|prun|Adding resource result|Updating operation state" /tmp/e2e-server.log | tail -300 || echo "no matching lines"
+          echo "::endgroup::"
       - name: Upload e2e coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -2635,3 +2635,103 @@ func TestDestinationFailed(t *testing.T) {
 	assert.False(t, destinationFailed(synccommon.OperationTerminating))
 	assert.False(t, destinationFailed(synccommon.OperationSucceeded))
 }
+
+// TestSyncAppStateDistinctClustersDoesNotCrossPrune is the sync-side counterpart of
+// TestCompareAppStateDistinctClusters. The comparison already attributes each resource to exactly
+// one destination; what this pins down is that the sync does too.
+//
+// The failure it was written for: with one resource per destination, both already live in their own
+// cluster, an end-to-end run produced two results for each resource -- Synced from the destination
+// that owns it and Pruned from the other. Both resources were created and then deleted inside a
+// single operation, so nothing survived.
+func TestSyncAppStateDistinctClustersDoesNotCrossPrune(t *testing.T) {
+	t.Parallel()
+
+	const secondServer = "https://second.example.com"
+
+	secondClusterSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "second-cluster-secret",
+			Namespace: test.FakeArgoCDNamespace,
+			Labels:    map[string]string{"argocd.argoproj.io/secret-type": "cluster"},
+		},
+		Data: map[string][]byte{
+			"name":   []byte("second"),
+			"server": []byte(secondServer),
+			"config": []byte(`{"bearerToken":"fake","tlsClientConfig":{"insecure":true},"awsAuthConfig":null}`),
+		},
+	}
+
+	app := newFakeApp()
+	app.Status.OperationState = nil
+	app.Spec.Destinations = []v1alpha1.NamedDestination{{
+		Name:      "other",
+		Server:    secondServer,
+		Namespace: "other-ns",
+	}}
+
+	defaultProject := &v1alpha1.AppProject{
+		ObjectMeta: metav1.ObjectMeta{Namespace: test.FakeArgoCDNamespace, Name: "default"},
+		Spec: v1alpha1.AppProjectSpec{
+			SourceRepos:  []string{"*"},
+			Destinations: []v1alpha1.ApplicationDestination{{Server: "*", Namespace: "*"}},
+		},
+	}
+
+	// Each cluster holds exactly the resource routed to it, tracking annotation and all, as it
+	// would after a successful sync. Without the annotation isSelfReferencedObj rejects the object.
+	primaryPod := multiDestPod("primary-pod", "")
+	primaryPod.SetNamespace(test.FakeDestNamespace)
+	primaryPod.SetAnnotations(map[string]string{
+		common.AnnotationKeyAppInstance: app.Name + ":/Pod:" + test.FakeDestNamespace + "/primary-pod",
+	})
+	otherPod := multiDestPod("other-pod", "other")
+	otherPod.SetNamespace("other-ns")
+	otherPod.SetAnnotations(map[string]string{
+		common.AnnotationKeyDestination: "other",
+		common.AnnotationKeyAppInstance: app.Name + ":/Pod:other-ns/other-pod",
+	})
+
+	data := fakeData{
+		apps: []runtime.Object{app, defaultProject},
+		manifestResponse: &apiclient.ManifestResponse{
+			Manifests: []string{
+				toJSON(t, multiDestPod("primary-pod", "")),
+				toJSON(t, multiDestPod("other-pod", "other")),
+			},
+			Namespace: test.FakeDestNamespace,
+			Server:    test.FakeClusterURL,
+			Revision:  "abc123",
+		},
+		additionalObjs: []runtime.Object{secondClusterSecret},
+		managedLiveObjsByCluster: map[string]map[kube.ResourceKey]*unstructured.Unstructured{
+			test.FakeClusterURL: {kube.GetResourceKey(primaryPod): primaryPod},
+			secondServer:        {kube.GetResourceKey(otherPod): otherPod},
+		},
+	}
+	ctrl := newFakeController(t.Context(), &data, nil)
+
+	opState := &v1alpha1.OperationState{Operation: v1alpha1.Operation{
+		Sync: &v1alpha1.SyncOperation{Prune: true},
+	}}
+	ctrl.appStateManager.SyncAppState(t.Context(), app, defaultProject, opState)
+
+	require.NotNil(t, opState.SyncResult)
+	for _, res := range opState.SyncResult.Resources {
+		t.Logf("result %s/%s destination=%q status=%s message=%q", res.Namespace, res.Name, res.Destination, res.Status, res.Message)
+	}
+
+	// A resource belongs to one destination, so it must produce one result. Two results for the
+	// same resource means a destination acted on a resource that is not its own.
+	countByName := map[string]int{}
+	destByName := map[string][]string{}
+	for _, res := range opState.SyncResult.Resources {
+		countByName[res.Name]++
+		destByName[res.Name] = append(destByName[res.Name], res.Destination)
+		assert.NotEqual(t, synccommon.ResultCodePruned, res.Status,
+			"%s/%s was pruned by destination %q; each destination must ignore the other's resources",
+			res.Namespace, res.Name, res.Destination)
+	}
+	assert.Equal(t, 1, countByName["primary-pod"], "primary-pod produced results from destinations %v", destByName["primary-pod"])
+	assert.Equal(t, 1, countByName["other-pod"], "other-pod produced results from destinations %v", destByName["other-pod"])
+}
