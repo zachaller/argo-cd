@@ -566,6 +566,34 @@ func TestConstructBasedOnName(t *testing.T) {
 
 func TestFilterResources(t *testing.T) {
 	t.Parallel()
+	t.Run("Filter by destination", func(t *testing.T) {
+		t.Parallel()
+		// The same Service in the same namespace of two different clusters. Without a destination
+		// these are indistinguishable, and the caller is told to pass --all -- which would act on
+		// both, in two clusters, when one was meant.
+		const svc = "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"name\":\"web\",\"namespace\":\"shared\"}}"
+		resources := []*v1alpha1.ResourceDiff{
+			{LiveState: svc, Destination: ""},
+			{LiveState: svc, Destination: "second"},
+		}
+
+		_, err := FilterResources(false, resources, "g", "Service", "shared", "web", "", false)
+		require.Error(t, err, "both copies match, so the command cannot choose")
+		assert.Contains(t, err.Error(), "multiple resources match")
+
+		named, err := FilterResources(false, resources, "g", "Service", "shared", "web", "second", false)
+		require.NoError(t, err)
+		require.Len(t, named, 1)
+
+		primary, err := FilterResources(false, resources, "g", "Service", "shared", "web", v1alpha1.PrimaryDestinationSelector, false)
+		require.NoError(t, err)
+		require.Len(t, primary, 1)
+
+		_, err = FilterResources(false, resources, "g", "Service", "shared", "web", "absent", false)
+		require.Error(t, err, "a destination the resource is not in must not fall back to another")
+		assert.Contains(t, err.Error(), "no matching resource found")
+	})
+
 	t.Run("Filter by ns", func(t *testing.T) {
 		t.Parallel()
 		resources := []*v1alpha1.ResourceDiff{
@@ -577,7 +605,7 @@ func TestFilterResources(t *testing.T) {
 			},
 		}
 
-		filteredResources, err := FilterResources(false, resources, "g", "Service", "ns", "test-helm-guestbook", true)
+		filteredResources, err := FilterResources(false, resources, "g", "Service", "ns", "test-helm-guestbook", "", true)
 		require.NoError(t, err)
 		assert.Len(t, filteredResources, 1)
 	})
@@ -593,7 +621,7 @@ func TestFilterResources(t *testing.T) {
 			},
 		}
 
-		filteredResources, err := FilterResources(false, resources, "g", "Deployment", "argocd", "test-helm-guestbook", true)
+		filteredResources, err := FilterResources(false, resources, "g", "Deployment", "argocd", "test-helm-guestbook", "", true)
 		require.NoError(t, err)
 		assert.Len(t, filteredResources, 1)
 	})
@@ -609,7 +637,7 @@ func TestFilterResources(t *testing.T) {
 			},
 		}
 
-		filteredResources, err := FilterResources(false, resources, "g", "Service", "argocd", "test-helm", true)
+		filteredResources, err := FilterResources(false, resources, "g", "Service", "argocd", "test-helm", "", true)
 		require.NoError(t, err)
 		assert.Len(t, filteredResources, 1)
 	})
@@ -625,7 +653,7 @@ func TestFilterResources(t *testing.T) {
 			},
 		}
 
-		filteredResources, err := FilterResources(false, resources, "g", "Service", "argocd-unknown", "test-helm", true)
+		filteredResources, err := FilterResources(false, resources, "g", "Service", "argocd-unknown", "test-helm", "", true)
 		require.ErrorContains(t, err, "no matching resource found")
 		assert.Nil(t, filteredResources)
 	})
@@ -641,7 +669,7 @@ func TestFilterResources(t *testing.T) {
 			},
 		}
 
-		filteredResources, err := FilterResources(false, resources, "g", "Service", "argocd", "test-helm", false)
+		filteredResources, err := FilterResources(false, resources, "g", "Service", "argocd", "test-helm", "", false)
 		require.ErrorContains(t, err, "use the --all flag")
 		assert.Nil(t, filteredResources)
 	})

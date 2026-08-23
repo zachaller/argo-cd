@@ -344,7 +344,7 @@ func NewApplicationPatchResourceCommand(clientOpts *argocdclient.ClientOptions) 
 			AppNamespace:    &appNs,
 		})
 		errors.CheckError(err)
-		objectsToPatch, err := util.FilterResources(command.Flags().Changed("group"), resources.Items, group, kind, namespace, resourceName, all)
+		objectsToPatch, err := util.FilterResources(command.Flags().Changed("group"), resources.Items, group, kind, namespace, resourceName, destination, all)
 		errors.CheckError(err)
 		for i := range objectsToPatch {
 			obj := objectsToPatch[i]
@@ -416,7 +416,7 @@ func NewApplicationDeleteResourceCommand(clientOpts *argocdclient.ClientOptions)
 			AppNamespace:    &appNs,
 		})
 		errors.CheckError(err)
-		objectsToDelete, err := util.FilterResources(command.Flags().Changed("group"), resources.Items, group, kind, namespace, resourceName, all)
+		objectsToDelete, err := util.FilterResources(command.Flags().Changed("group"), resources.Items, group, kind, namespace, resourceName, destination, all)
 		errors.CheckError(err)
 
 		promptUtil := utils.NewPrompt(clientOpts.PromptsEnabled)

@@ -944,8 +944,22 @@ func LiveObjects(resources []*argoappv1.ResourceDiff) ([]*unstructured.Unstructu
 	return objs, nil
 }
 
-func FilterResources(groupChanged bool, resources []*argoappv1.ResourceDiff, group, kind, namespace, resourceName string, all bool) ([]*unstructured.Unstructured, error) {
-	liveObjs, err := LiveObjects(resources)
+// FilterResources narrows an application's managed resources to those a command should act on.
+//
+// destination selects one of the application's destinations, and is filtered on before anything
+// else: with several destinations the same group, kind, namespace and name can exist in more than
+// one, and a live object on its own no longer identifies a resource. Without this the caller would
+// be told the inputs match multiple resources and offered --all, which would act on the copy in
+// every cluster rather than the one meant. An empty destination matches all of them, which is what
+// a command that does not mention one asks for.
+func FilterResources(groupChanged bool, resources []*argoappv1.ResourceDiff, group, kind, namespace, resourceName, destination string, all bool) ([]*unstructured.Unstructured, error) {
+	selected := make([]*argoappv1.ResourceDiff, 0, len(resources))
+	for _, r := range resources {
+		if argoappv1.DestinationSelectorMatches(destination, r.Destination) {
+			selected = append(selected, r)
+		}
+	}
+	liveObjs, err := LiveObjects(selected)
 	errors.CheckError(err)
 	filteredObjects := make([]*unstructured.Unstructured, 0)
 	for i := range liveObjs {
