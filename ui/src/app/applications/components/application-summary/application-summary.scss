@@ -21,6 +21,33 @@
         margin-right: 2px;
     }
 
+    // One row per named destination: the name a manifest annotation refers to, then the cluster it
+    // resolves to and the namespace within it.
+    &__destinations {
+        padding-top: 0.5em;
+    }
+
+    &__destination {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.5em;
+        line-height: 22px;
+    }
+
+    &__destination-name {
+        background-color: $argo-color-gray-5;
+        color: white;
+        border-radius: 5px;
+        padding: 2px 6px;
+        line-height: 16px;
+        cursor: help;
+    }
+
+    &__destination-namespace {
+        color: $argo-color-gray-6;
+    }
+
     &__sort-icon {
         cursor: pointer;
         position: absolute;

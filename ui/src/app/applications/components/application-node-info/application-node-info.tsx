@@ -109,6 +109,25 @@ export const ApplicationNodeInfo = (props: {
         {title: 'NAME', value: <ClipboardText text={props.node.name} />},
         {title: 'NAMESPACE', value: <ClipboardText text={props.node.namespace} />}
     ];
+    // Which cluster this resource is actually in. Only shown for Applications that declare named
+    // destinations -- for every other Application there is exactly one cluster and the summary panel
+    // already names it, so the row would be noise. An empty node destination means spec.destination.
+    if ((props.application.spec.destinations || []).length > 0) {
+        const named = (props.application.spec.destinations || []).find(dest => dest.name === props.node.destination);
+        attributes.push({
+            title: 'DESTINATION',
+            value: (
+                <div className='application-node-info__destination'>
+                    <span className='application-node-info__destination-name'>{props.node.destination || 'spec.destination'}</span>
+                    {named ? (
+                        <Cluster server={named.server || ''} name={named.clusterName} showUrl={true} />
+                    ) : (
+                        <Cluster server={props.application.spec.destination.server} name={props.application.spec.destination.name} showUrl={true} />
+                    )}
+                </div>
+            )
+        });
+    }
     if (props.node.createdAt) {
         attributes.push({
             title: 'CREATED AT',

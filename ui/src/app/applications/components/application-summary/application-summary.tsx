@@ -275,6 +275,33 @@ export const ApplicationSummary = (props: ApplicationSummaryProps) => {
         }
     ];
 
+    // Only shown when the Application actually declares named destinations, so an Application that
+    // does not use the feature looks exactly as it did before. Read-only: the destination list is
+    // edited through the spec or `argocd app set --dest`, and a repeated editor here would be a
+    // much larger change than showing where the resources go.
+    const namedDestinations = app.spec.destinations || [];
+    if (namedDestinations.length > 0) {
+        const afterNamespace = attributes.findIndex(item => item.title === 'NAMESPACE');
+        attributes.splice(afterNamespace < 0 ? attributes.length : afterNamespace + 1, 0, {
+            title: 'ADDITIONAL DESTINATIONS',
+            view: (
+                <div className='application-summary__destinations'>
+                    {namedDestinations.map(dest => (
+                        <div className='application-summary__destination' key={dest.name}>
+                            <span
+                                className='application-summary__destination-name'
+                                title={`Manifests select this destination with the argocd.argoproj.io/destination: ${dest.name} annotation`}>
+                                {dest.name}
+                            </span>
+                            <Cluster server={dest.server || ''} name={dest.clusterName} showUrl={true} />
+                            {dest.namespace && <span className='application-summary__destination-namespace'>{dest.namespace}</span>}
+                        </div>
+                    ))}
+                </div>
+            )
+        });
+    }
+
     const urls = app.status.summary.externalURLs || [];
     if (urls.length > 0) {
         attributes.push({
