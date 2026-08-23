@@ -74,6 +74,18 @@ func TestMultiDestinationPlacement(t *testing.T) {
 			_, err := fixture.KubeClientset.CoreV1().ConfigMaps(ctx.DeploymentNamespace()).Get(t.Context(), "primary-cm", metav1.GetOptions{})
 			require.NoError(t, err, "the unannotated manifest must land in the primary destination")
 		}).
+		And(func(app *Application) {
+			// What each resource is attributed to and how it compares, recorded before the
+			// expectation below can time out. Without it a convergence failure says only that the
+			// Application is OutOfSync, not which destination's resource disagrees or how.
+			for _, res := range app.Status.Resources {
+				t.Logf("resource %s/%s destination=%q status=%s health=%v",
+					res.Namespace, res.Name, res.Destination, res.Status, res.Health)
+			}
+			for _, cond := range app.Status.Conditions {
+				t.Logf("condition %s: %s", cond.Type, cond.Message)
+			}
+		}).
 		Expect(SyncStatusIs(SyncStatusCodeSynced)).
 		Expect(HealthIs(health.HealthStatusHealthy))
 }
