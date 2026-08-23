@@ -2805,15 +2805,17 @@ func multiDestPod(name, destination string) *unstructured.Unstructured {
 	return pod
 }
 
-// Two destinations on the same cluster but in different namespaces. This is the cheapest genuine
-// multi-destination setup: distinct (server, namespace) pairs, so it passes the distinctness rule
+// Two destinations on the same cluster but in different namespaces. Cheap to set up, and enough to
+// exercise routing and attribution, though not a shape an Application may actually declare
 // while still exercising per-destination routing, namespacing and tagging.
 func TestCompareAppStateMultipleDestinations(t *testing.T) {
 	t.Parallel()
 
 	app := newFakeApp()
-	// Same registered cluster as spec.destination, different namespace: a distinct
-	// (server, namespace) pair, so it satisfies the distinctness rule.
+	// Two destinations on one cluster, which ValidateDistinctDestinations rejects -- CompareAppState
+	// does not run that validation, so this still exercises routing and attribution. The
+	// distinct-cluster shape a real Application has is covered by
+	// TestCompareAppStateDistinctClusters.
 	app.Spec.Destinations = []v1alpha1.NamedDestination{{
 		Name:      "other",
 		Server:    app.Spec.Destination.Server,
@@ -2962,4 +2964,96 @@ func TestWarnOnDivergentCapabilities(t *testing.T) {
 		// on top would be misleading noise.
 		assert.Empty(t, m.warnOnDivergentCapabilities(resolved, order, metav1.Now()))
 	})
+}
+
+// TestCompareAppStateDistinctClusters is the shape a real multi-destination Application has, and the
+// one the end-to-end tests exercise: each destination is a different cluster, and each cluster holds
+// only the resources routed to it. The mock returns per-cluster live objects, because a single live
+// set for every cluster cannot represent that.
+func TestCompareAppStateDistinctClusters(t *testing.T) {
+	t.Parallel()
+
+	const secondServer = "https://second.example.com"
+
+	secondClusterSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "second-cluster-secret",
+			Namespace: test.FakeArgoCDNamespace,
+			Labels:    map[string]string{"argocd.argoproj.io/secret-type": "cluster"},
+		},
+		Data: map[string][]byte{
+			"name":   []byte("second"),
+			"server": []byte(secondServer),
+			"config": []byte(`{"bearerToken":"fake","tlsClientConfig":{"insecure":true},"awsAuthConfig":null}`),
+		},
+	}
+
+	app := newFakeApp()
+	app.Spec.Destinations = []v1alpha1.NamedDestination{{
+		Name:      "other",
+		Server:    secondServer,
+		Namespace: "other-ns",
+	}}
+
+	// Live objects have to look like what a sync would have left behind, tracking annotation and
+	// all: without it isSelfReferencedObj rejects them and every resource reads as OutOfSync.
+	primaryPod := multiDestPod("primary-pod", "")
+	primaryPod.SetNamespace(test.FakeDestNamespace)
+	primaryPod.SetAnnotations(map[string]string{
+		common.AnnotationKeyAppInstance: app.Name + ":/Pod:" + test.FakeDestNamespace + "/primary-pod",
+	})
+	otherPod := multiDestPod("other-pod", "other")
+	otherPod.SetNamespace("other-ns")
+	otherPod.SetAnnotations(map[string]string{
+		common.AnnotationKeyDestination: "other",
+		common.AnnotationKeyAppInstance: app.Name + ":/Pod:other-ns/other-pod",
+	})
+
+	data := fakeData{
+		manifestResponse: &apiclient.ManifestResponse{
+			Manifests: []string{
+				toJSON(t, multiDestPod("primary-pod", "")),
+				toJSON(t, multiDestPod("other-pod", "other")),
+			},
+			Namespace: test.FakeDestNamespace,
+			Server:    test.FakeClusterURL,
+			Revision:  "abc123",
+		},
+		additionalObjs: []runtime.Object{secondClusterSecret},
+		// Each cluster holds exactly the resource routed to it, as it would after a successful sync.
+		managedLiveObjsByCluster: map[string]map[kube.ResourceKey]*unstructured.Unstructured{
+			test.FakeClusterURL: {kube.GetResourceKey(primaryPod): primaryPod},
+			secondServer:        {kube.GetResourceKey(otherPod): otherPod},
+		},
+	}
+	ctrl := newFakeController(t.Context(), &data, nil)
+
+	compRes, err := ctrl.appStateManager.CompareAppState(
+		t.Context(), app, &defaultProj, []string{""}, []v1alpha1.ApplicationSource{app.Spec.GetSource()}, false, false, nil, false)
+	require.NoError(t, err)
+	require.NotNil(t, compRes)
+
+	assert.Equal(t, []string{argo.PrimaryDestinationName, "other"}, compRes.destOrder)
+
+	byName := map[string]v1alpha1.ResourceStatus{}
+	for _, r := range compRes.resources {
+		byName[r.Name] = r
+	}
+	require.Contains(t, byName, "primary-pod")
+	require.Contains(t, byName, "other-pod")
+
+	assert.Equal(t, argo.PrimaryDestinationName, byName["primary-pod"].Destination)
+	assert.Equal(t, "other", byName["other-pod"].Destination)
+
+	// Neither resource may be marked for pruning. A destination that saw the other's live objects
+	// would find them unmatched by any of its own targets and prune them, which is what deploying to
+	// two clusters must never do.
+	for name, res := range byName {
+		assert.False(t, res.RequiresPruning, "%s must not be marked for pruning", name)
+	}
+
+	// The named destination is compared against its own cluster: the resource routed there is found
+	// live and reads as Synced. Compared against the primary cluster, where it does not exist, it
+	// would read as OutOfSync forever.
+	assert.Equal(t, v1alpha1.SyncStatusCodeSynced, byName["other-pod"].Status)
 }

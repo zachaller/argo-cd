@@ -69,10 +69,14 @@ type namespacedResource struct {
 }
 
 type fakeData struct {
-	apps                            []runtime.Object
-	manifestResponse                *apiclient.ManifestResponse
-	manifestResponses               []*apiclient.ManifestResponse
-	managedLiveObjs                 map[kube.ResourceKey]*unstructured.Unstructured
+	apps              []runtime.Object
+	manifestResponse  *apiclient.ManifestResponse
+	manifestResponses []*apiclient.ManifestResponse
+	managedLiveObjs   map[kube.ResourceKey]*unstructured.Unstructured
+	// managedLiveObjsByCluster, when set, gives each cluster its own live objects, keyed by server
+	// URL. The single managedLiveObjs above is returned for every cluster, which cannot represent an
+	// application whose destinations are different clusters holding different resources.
+	managedLiveObjsByCluster        map[string]map[kube.ResourceKey]*unstructured.Unstructured
 	namespacedResources             map[kube.ResourceKey]namespacedResource
 	configMapData                   map[string]string
 	metricsCacheExpiration          time.Duration
@@ -282,7 +286,16 @@ func newFakeControllerWithResync(ctx context.Context, data *fakeData, appResyncP
 	ctrl.appStateManager.(*appStateManager).liveStateCache = mockStateCache
 	ctrl.stateCache = mockStateCache
 	mockStateCache.EXPECT().IsNamespaced(mock.Anything, mock.Anything).Return(true, nil)
-	mockStateCache.EXPECT().GetManagedLiveObjs(mock.Anything, mock.Anything, mock.Anything).Return(data.managedLiveObjs, nil)
+	mockStateCache.EXPECT().GetManagedLiveObjs(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(cluster *v1alpha1.Cluster, _ *v1alpha1.Application, _ []*unstructured.Unstructured) (map[kube.ResourceKey]*unstructured.Unstructured, error) {
+			if data.managedLiveObjsByCluster != nil {
+				if objs, ok := data.managedLiveObjsByCluster[cluster.Server]; ok {
+					return objs, nil
+				}
+				return map[kube.ResourceKey]*unstructured.Unstructured{}, nil
+			}
+			return data.managedLiveObjs, nil
+		})
 	mockStateCache.EXPECT().GetVersionsInfo(mock.Anything).Return("v1.2.3", nil, nil)
 	response := make(map[kube.ResourceKey]v1alpha1.ResourceNode)
 	for k, v := range data.namespacedResources {
