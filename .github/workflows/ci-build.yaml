@@ -730,7 +730,7 @@ jobs:
         if: ${{ failure() }}
         run: |
           echo "::group::controller log (multi-destination)"
-          grep -iE "multi-destination|destination=|prun|Adding resource result|Updating operation state" /tmp/e2e-server.log | tail -300 || echo "no matching lines"
+          grep -iE "syncing destination|Applying resource|Adding resource result|Pruning|Updating operation state" /tmp/e2e-server.log | tail -400 || echo "no matching lines"
           echo "::endgroup::"
       - name: Upload e2e coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

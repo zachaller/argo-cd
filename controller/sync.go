@@ -962,7 +962,18 @@ func (m *appStateManager) syncDestination(
 	}
 	restConfig := metrics.AddMetricsTransportWrapper(m.metricsServer, app, clusterRESTConfig)
 
+	// Which destination this context is, which cluster it will apply to, and how many objects it
+	// carries. With more than one destination the cluster a resource reaches is the thing most
+	// worth being able to confirm from a log, and it is not otherwise recoverable: the engine logs
+	// the API server it applied to but never the destination that chose it.
+	logEntry = logEntry.WithFields(log.Fields{
+		"destination":       dest.Name,
+		"destinationServer": destCluster.Server,
+	})
+
 	reconciliationResult := dc.reconciliationResult
+	logEntry.Infof("syncing destination %q to cluster %s in namespace %q: %d target, %d live",
+		dest.Name, destCluster.Server, destNamespace, len(reconciliationResult.Target), len(reconciliationResult.Live))
 
 	// if RespectIgnoreDifferences is enabled, it should normalize the target
 	// resources which in this case applies the live values in the configured
