@@ -130,6 +130,20 @@ The check is off by default and, when on, applies only to the names in `spec.des
 primary `spec.destination` is unaffected. See
 [the `destinations` resource](../operator-manual/rbac.md#the-destinations-resource).
 
+## Testing
+
+The end-to-end tests for this feature need two genuinely separate clusters, for the same reason two
+destinations may not share one. CI creates a second cluster with [k3d](https://k3d.io) at the same
+Kubernetes version as the first. To run them locally:
+
+```bash
+make start-e2e-second-cluster
+ARGOCD_E2E_SECOND_CLUSTER_KUBECONFIG=$HOME/.kube/second-cluster.config make test-e2e-local
+make stop-e2e-second-cluster
+```
+
+Without the second cluster those tests skip; the tests for the validation rules run either way.
+
 ## Deletion
 
 Deleting an Application removes its resources from every destination it deploys to. A destination is

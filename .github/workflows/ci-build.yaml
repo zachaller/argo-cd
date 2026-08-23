@@ -625,6 +625,26 @@ jobs:
           sudo chown $(whoami) $HOME/.kube/config
           sudo chmod go-r $HOME/.kube/config
           kubectl version
+      - name: Install a second cluster for multi-destination tests
+        env:
+          K3D_VERSION: v5.8.3
+        run: |
+          set -x
+          # A multi-destination Application needs two genuinely separate clusters. Argo CD reads
+          # live objects once per cluster and attributes them to an Application by an annotation
+          # naming the Application rather than the destination, so two destinations backed by the
+          # same API server would each see the other's resources as extras. k3d runs the second
+          # cluster in Docker, at the same Kubernetes version as the k3s one above, so both
+          # clusters exercise the version this matrix leg is for.
+          curl -sfL "https://raw.githubusercontent.com/k3d-io/k3d/${K3D_VERSION}/install.sh" | TAG="${K3D_VERSION}" bash
+          k3d cluster create argocd-e2e-second \
+            --image "rancher/k3s:${{ matrix.k3s.version }}-k3s1" \
+            --no-lb \
+            --k3s-arg "--disable=traefik@server:0" \
+            --wait
+          k3d kubeconfig get argocd-e2e-second > $HOME/.kube/second-cluster.config
+          chmod go-r $HOME/.kube/second-cluster.config
+          echo "ARGOCD_E2E_SECOND_CLUSTER_KUBECONFIG=$HOME/.kube/second-cluster.config" >> $GITHUB_ENV
       - name: Restore go build and module cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

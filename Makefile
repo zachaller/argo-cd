@@ -511,6 +511,23 @@ start-e2e: test-tools-image
 	mkdir -p ${GOCACHE}
 	$(call run-in-test-server,make ARGOCD_PROCFILE=test/container/Procfile start-e2e-local)
 
+# Creates a second cluster for the multi-destination e2e tests, which need two genuinely separate
+# clusters: Argo CD reads live objects once per cluster and attributes them to an Application by an
+# annotation naming the Application rather than the destination, so two destinations backed by one
+# API server would each see the other's resources as extras.
+#
+# The second cluster is optional. Without it the multi-destination e2e tests skip and everything
+# else runs as before.
+.PHONY: start-e2e-second-cluster
+start-e2e-second-cluster:
+	k3d cluster create argocd-e2e-second --no-lb --k3s-arg "--disable=traefik@server:0" --wait
+	k3d kubeconfig get argocd-e2e-second > $(HOME)/.kube/second-cluster.config
+	@echo "Now run the e2e tests with ARGOCD_E2E_SECOND_CLUSTER_KUBECONFIG=$(HOME)/.kube/second-cluster.config"
+
+.PHONY: stop-e2e-second-cluster
+stop-e2e-second-cluster:
+	k3d cluster delete argocd-e2e-second
+
 # Starts e2e server locally (or within a container)
 .PHONY: start-e2e-local
 start-e2e-local: mod-vendor-local dep-ui-local cli-local
