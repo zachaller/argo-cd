@@ -707,6 +707,15 @@ jobs:
             count=$((count+1))
           done
       - name: Run E2E testsuite
+        # TEMPORARY -- REVERT BEFORE MERGE.
+        # ARGOCD_E2E_RUN restricts the suite to the multi-destination tests, and ARGOCD_E2E_RERUN_FAILS
+        # drops the retry count, so that iterating on them costs minutes rather than an hour. This
+        # narrows the branch's e2e coverage to almost nothing: every other e2e test is skipped, so a
+        # regression elsewhere in this change would go unnoticed while it is in place. Both lines must
+        # come out, and a full run must be green, before this is merged.
+        env:
+          ARGOCD_E2E_RUN: TestMultiDestination
+          ARGOCD_E2E_RERUN_FAILS: '1'
         run: |
           set -x
           make test-e2e-local
