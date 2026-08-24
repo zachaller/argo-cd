@@ -8827,6 +8827,10 @@
       "description": "HostInfo holds metadata and resource usage metrics for a specific host in the cluster.",
       "type": "object",
       "properties": {
+        "destination": {
+          "description": "Destination is the name of the Application destination whose cluster this host belongs to,\nempty for spec.destination. Node names are only unique within a cluster, so without it two\nclusters' identically named nodes are indistinguishable once the lists are merged.",
+          "type": "string"
+        },
         "labels": {
           "description": "Labels holds the labels attached to the host.",
           "type": "object",

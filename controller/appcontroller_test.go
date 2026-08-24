@@ -3824,13 +3824,15 @@ func TestGetAppHosts(t *testing.T) {
 	})).Return(nil).Maybe()
 	ctrl.stateCache = mockStateCache
 
-	hosts, err := ctrl.getAppHosts(&v1alpha1.Cluster{Server: "test", Name: "test"}, app, []v1alpha1.ResourceNode{{
+	appNodes := []v1alpha1.ResourceNode{{
 		ResourceRef: v1alpha1.ResourceRef{Name: "pod1", Namespace: "default", Kind: kube.PodKind},
 		Info: []v1alpha1.InfoItem{{
 			Name:  "Host",
 			Value: "Minikube",
 		}},
-	}})
+	}}
+
+	hosts, err := ctrl.getAppHosts(&v1alpha1.Cluster{Server: "test", Name: "test"}, "", app, appNodes)
 
 	require.NoError(t, err)
 	assert.Equal(t, []v1alpha1.HostInfo{{
@@ -3843,6 +3845,15 @@ func TestGetAppHosts(t *testing.T) {
 		},
 		Labels: map[string]string{"label1": "value1", "label2": "value2"},
 	}}, hosts)
+
+	// A host read from a named destination records it. Node names are unique only within a cluster,
+	// so once every destination's hosts are merged this is the only thing telling two identically
+	// named nodes apart.
+	named, err := ctrl.getAppHosts(&v1alpha1.Cluster{Server: "test", Name: "test"}, "second", app, appNodes)
+	require.NoError(t, err)
+	require.Len(t, named, 1)
+	assert.Equal(t, "second", named[0].Destination)
+	assert.Equal(t, "minikube", named[0].Name, "the destination is recorded alongside the node name, not instead of it")
 }
 
 func TestMetricsExpiration(t *testing.T) {

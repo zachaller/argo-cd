@@ -1124,6 +1124,10 @@ export interface Node {
     systemInfo: NodeSystemInfo;
     resourcesInfo: HostResourceInfo[];
     labels: {[name: string]: string};
+    // The Application destination whose cluster this node belongs to, empty for spec.destination.
+    // Node names are unique only within a cluster, so two clusters can contribute nodes with the
+    // same name once the lists are merged.
+    destination?: string;
 }
 
 export interface NodeSystemInfo {

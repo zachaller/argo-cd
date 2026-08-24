@@ -687,7 +687,7 @@ func (ctrl *ApplicationController) getResourceTree(dests map[string]argo.Resolve
 			return nil, err
 		}
 
-		hosts, err := ctrl.getAppHosts(destCluster, a, nodes)
+		hosts, err := ctrl.getAppHosts(destCluster, destName, a, nodes)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get app hosts: %w", err)
 		}
@@ -738,7 +738,11 @@ func (ctrl *ApplicationController) getResourceTree(dests map[string]argo.Resolve
 	return &appv1.ApplicationTree{Nodes: nodes, OrphanedNodes: orphanedNodes, Hosts: hosts}, nil
 }
 
-func (ctrl *ApplicationController) getAppHosts(destCluster *appv1.Cluster, a *appv1.Application, appNodes []appv1.ResourceNode) ([]appv1.HostInfo, error) {
+// getAppHosts returns the cluster nodes the application's pods run on. destName names the
+// destination the cluster was resolved from, and is recorded on each host: node names are unique
+// only within a cluster, so once the destinations' lists are merged it is the only thing telling
+// two identically named nodes apart.
+func (ctrl *ApplicationController) getAppHosts(destCluster *appv1.Cluster, destName string, a *appv1.Application, appNodes []appv1.ResourceNode) ([]appv1.HostInfo, error) {
 	ts := stats.NewTimingStats()
 	defer func() {
 		logCtx := log.WithFields(applog.GetAppLogFields(a))
@@ -840,7 +844,7 @@ func (ctrl *ApplicationController) getAppHosts(destCluster *appv1.Cluster, a *ap
 			}
 		}
 
-		hosts = append(hosts, appv1.HostInfo{Name: nodeName, SystemInfo: node.SystemInfo, ResourcesInfo: resourcesInfo, Labels: nodeLabels})
+		hosts = append(hosts, appv1.HostInfo{Name: nodeName, SystemInfo: node.SystemInfo, ResourcesInfo: resourcesInfo, Labels: nodeLabels, Destination: destName})
 	}
 	ts.AddCheckpoint("process_app_pods_by_node_ms")
 	return hosts, nil

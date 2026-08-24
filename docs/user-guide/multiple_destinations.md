@@ -169,6 +169,12 @@ next attempt starts clean everywhere.
 > safe to run against a different one -- and it does not block the deletion of the destinations that
 > are still reachable.
 
+## Pods by node
+
+The pod view's **Node** grouping shows the nodes of every destination. Node names are unique only
+within a cluster, so each group names the destination it belongs to, and a pod is only ever grouped
+under a node in its own cluster.
+
 ## Opening a terminal into a pod
 
 A terminal opens in the cluster the pod actually runs in. The UI sends the destination of the pod you

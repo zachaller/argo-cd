@@ -1293,6 +1293,11 @@ message HostInfo {
 
   // Labels holds the labels attached to the host.
   map<string, string> labels = 4;
+
+  // Destination is the name of the Application destination whose cluster this host belongs to,
+  // empty for spec.destination. Node names are only unique within a cluster, so without it two
+  // clusters' identically named nodes are indistinguishable once the lists are merged.
+  optional string destination = 5;
 }
 
 // HostResourceInfo represents resource usage details for a specific resource type on a host.

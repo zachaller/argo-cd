@@ -2115,6 +2115,10 @@ type HostInfo struct {
 	SystemInfo corev1.NodeSystemInfo `json:"systemInfo,omitempty" protobuf:"bytes,3,opt,name=systemInfo"`
 	// Labels holds the labels attached to the host.
 	Labels map[string]string `json:"labels,omitempty" protobuf:"bytes,4,opt,name=labels"`
+	// Destination is the name of the Application destination whose cluster this host belongs to,
+	// empty for spec.destination. Node names are only unique within a cluster, so without it two
+	// clusters' identically named nodes are indistinguishable once the lists are merged.
+	Destination string `json:"destination,omitempty" protobuf:"bytes,5,opt,name=destination"`
 }
 
 // ApplicationTree represents the hierarchical structure of resources associated with an Argo CD application.
