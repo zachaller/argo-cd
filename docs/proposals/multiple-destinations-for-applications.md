@@ -156,6 +156,28 @@ A second engine addition, `WithForceSyncFailPhase`, makes a failure in one desti
 `SyncFail` hooks in the others; `executeSyncFailPhase` otherwise fires only when a context's own
 tasks failed.
 
+### Deletion and delete hooks
+
+Deleting an Application removes its resources from every destination it deploys to, and the finalizer
+stays in place until all of them are clear. A destination whose cluster no longer resolves is skipped
+with a warning: its resources went with the cluster, and refusing to proceed would strand the
+resources that are still reachable elsewhere.
+
+`PreDelete` and `PostDelete` hooks are manifests like any other, so they are routed by the same
+annotation and are created, waited on and cleaned up in the destination they name. A hook that
+declares no namespace takes that destination's namespace, and its tracking annotation records that
+namespace -- matching what sync wrote when its siblings were applied there. The stage completes only
+when every destination's hooks have completed, since an Application is deleted as one unit, and a
+failed hook is removed in each destination it failed in so a retry starts clean everywhere.
+
+A hook whose destination no longer resolves is skipped rather than run somewhere else: a delete hook
+written for one cluster is not safe to run against a different one. Skipping it also keeps an
+unreachable destination from stranding the Application behind a hook that can never complete.
+
+Cleanup judges each destination's hooks by their own outcome. `HookSucceeded` and `HookFailed`
+describe what happened to that hook, not to the Application, so a hook that failed in one cluster
+does not change what the policy does to a hook in another.
+
 ### Manifest generation stays single
 
 Manifests are generated once, against `spec.destination`'s cluster. Generating per destination would
@@ -201,6 +223,19 @@ The same filter has to apply before a client decides a request is ambiguous. The
 target list from an Application's managed resources and refuses more than one match; without
 filtering by destination first it would report that the inputs match several resources and suggest
 acting on all of them, which would act on the copy in every cluster rather than the one meant.
+
+### Terminals and cluster nodes
+
+Opening a terminal resolves the pod in the resource tree first, and uses that pod's destination for
+both the cluster the shell opens in and the `destinations` check -- with the `create` action, the verb
+the `exec` check itself uses. A pod that exists in several destinations, in a request that names none,
+is refused: opening a shell in the wrong cluster is worse than refusing to open one.
+
+Cluster nodes are attributed as well, because node names are unique only within a cluster. The pod
+view groups pods by node, and keying those groups by name alone merges two clusters' identically
+named nodes -- `node-1` on kind or k3d, or a repeated instance name on a cloud provider -- into one
+group holding one cluster's capacity figures and both clusters' pods. `HostInfo` therefore carries the
+destination it was read from, and the grouping keys on the pair.
 
 ### Sharding
 
