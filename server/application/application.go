@@ -284,6 +284,83 @@ func (s *Server) getApplicationEnforceRBACClient(ctx context.Context, action, pr
 	})
 }
 
+// enforceDestinations checks the "destinations" RBAC resource for the named destinations an
+// Application declares, on top of the "applications" check the caller has already made. The two
+// compose as an AND: a user must be permitted the action on the Application and on every cluster
+// that Application pushes into.
+//
+// Only spec.destinations is checked. The primary spec.destination stays governed by the AppProject's
+// destination allow list and the applications check exactly as before, so enabling the feature
+// changes nothing for an Application that declares no named destinations -- which is also why the
+// settings are not read at all in that case.
+//
+// The object is "<project>/<destination-name>", matching how the resource is registered as project
+// scoped in util/rbac.
+func (s *Server) enforceDestinations(ctx context.Context, project string, dests []v1alpha1.NamedDestination, action string) error {
+	return enforceDestinations(ctx, s.enf, s.settingsMgr, project, dests, action)
+}
+
+// DestinationRBACGates reads the argocd-cm gates for the destinations authorization axis. It is
+// satisfied by *settings.SettingsManager, and keeps this check callable from the terminal handler,
+// which has no Server. It is exported only because that handler's constructor takes one.
+type DestinationRBACGates interface {
+	IsDestinationRBACEnabled() (bool, error)
+	IsDestinationRBACEnforced() (bool, error)
+}
+
+func enforceDestinations(ctx context.Context, enf *rbac.Enforcer, gates DestinationRBACGates, project string, dests []v1alpha1.NamedDestination, action string) error {
+	if len(dests) == 0 {
+		return nil
+	}
+	enabled, err := gates.IsDestinationRBACEnabled()
+	if err != nil {
+		return fmt.Errorf("error checking whether destination RBAC is enabled: %w", err)
+	}
+	if !enabled {
+		return nil
+	}
+	enforced, err := gates.IsDestinationRBACEnforced()
+	if err != nil {
+		return fmt.Errorf("error checking whether destination RBAC is enforced: %w", err)
+	}
+	for _, dest := range dests {
+		err := enf.EnforceErr(ctx.Value("claims"), rbac.ResourceDestinations, action, project+"/"+dest.Name)
+		if err == nil {
+			continue
+		}
+		if !enforced {
+			// Audit mode: report what would have been denied so operators can write the policies
+			// before turning enforcement on.
+			log.WithFields(map[string]any{
+				"project":                project,
+				"destination":            dest.Name,
+				argocommon.SecurityField: argocommon.SecurityMedium,
+			}).Warnf("user is not permitted to %s destination %q, but destination RBAC is not enforced", action, dest.Name)
+			continue
+		}
+		return err
+	}
+	return nil
+}
+
+// destinationsNamed returns the Application's named destination called name, in the form
+// enforceDestinations takes. The primary destination has no name and is not part of the destinations
+// authorization axis, so it yields nothing to check.
+func destinationsNamed(a *v1alpha1.Application, name string) []v1alpha1.NamedDestination {
+	if name == argo.PrimaryDestinationName {
+		return nil
+	}
+	for _, d := range a.Spec.Destinations {
+		if d.Name == name {
+			return []v1alpha1.NamedDestination{d}
+		}
+	}
+	// The resource claims a destination the spec no longer declares -- a tree read before the
+	// Application was edited. Fall back to requiring the whole set rather than nothing: a stale
+	// tree must not become a way to skip the check.
+	return a.Spec.Destinations
+}
+
 // List returns list of applications
 func (s *Server) List(ctx context.Context, q *application.ApplicationQuery) (*v1alpha1.ApplicationList, error) {
 	selector, err := labels.Parse(q.GetSelector())
@@ -352,6 +429,9 @@ func (s *Server) Create(ctx context.Context, q *application.ApplicationCreateReq
 	a := q.GetApplication()
 
 	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionCreate, a.RBACName(s.ns)); err != nil {
+		return nil, err
+	}
+	if err := s.enforceDestinations(ctx, a.Spec.GetProject(), a.Spec.Destinations, rbac.ActionCreate); err != nil {
 		return nil, err
 	}
 
@@ -510,7 +590,7 @@ func (s *Server) GetManifests(ctx context.Context, q *application.ApplicationMan
 			return fmt.Errorf("error getting app instance label key from settings: %w", err)
 		}
 
-		config, err := s.getApplicationClusterConfig(ctx, a, proj)
+		config, err := s.getApplicationClusterConfig(ctx, a, proj, argo.PrimaryDestinationName)
 		if err != nil {
 			return fmt.Errorf("error getting application cluster config: %w", err)
 		}
@@ -679,7 +759,7 @@ func (s *Server) GetManifestsWithFiles(stream application.ApplicationService_Get
 			return fmt.Errorf("error getting trackingMethod from settings: %w", err)
 		}
 
-		config, err := s.getApplicationClusterConfig(ctx, a, proj)
+		config, err := s.getApplicationClusterConfig(ctx, a, proj, argo.PrimaryDestinationName)
 		if err != nil {
 			return fmt.Errorf("error getting application cluster config: %w", err)
 		}
@@ -924,9 +1004,13 @@ func (s *Server) ListResourceEvents(ctx context.Context, q *application.Applicat
 			return nil, fmt.Errorf("error getting app resources: %w", err)
 		}
 		found := false
+		// The destination the resource lives in, so its events are read from that cluster rather
+		// than from the primary one. The UID makes the match exact, so there is no ambiguity here.
+		destName := argo.PrimaryDestinationName
 		for _, n := range append(tree.Nodes, tree.OrphanedNodes...) {
 			if n.UID == q.GetResourceUID() && n.Name == q.GetResourceName() && n.Namespace == q.GetResourceNamespace() {
 				found = true
+				destName = n.Destination
 				break
 			}
 		}
@@ -936,7 +1020,7 @@ func (s *Server) ListResourceEvents(ctx context.Context, q *application.Applicat
 
 		namespace = q.GetResourceNamespace()
 		var config *rest.Config
-		config, err = s.getApplicationClusterConfig(ctx, a, p)
+		config, err = s.getApplicationClusterConfig(ctx, a, p, destName)
 		if err != nil {
 			return nil, fmt.Errorf("error getting application cluster config: %w", err)
 		}
@@ -967,6 +1051,16 @@ func (s *Server) validateAndUpdateApp(ctx context.Context, newApp *v1alpha1.Appl
 
 	app, proj, err := s.getApplicationEnforceRBACClient(ctx, action, currentProject, newApp.Namespace, newApp.Name, "")
 	if err != nil {
+		return nil, err
+	}
+
+	// Both the stored and the incoming destinations: the user must be permitted the ones the
+	// Application already pushes into to change it at all, and the ones it would push into
+	// afterwards so that an update cannot point it at a cluster they may not reach.
+	if err := s.enforceDestinations(ctx, app.Spec.GetProject(), app.Spec.Destinations, action); err != nil {
+		return nil, err
+	}
+	if err := s.enforceDestinations(ctx, newApp.Spec.GetProject(), newApp.Spec.Destinations, action); err != nil {
 		return nil, err
 	}
 
@@ -1170,6 +1264,9 @@ func (s *Server) Delete(ctx context.Context, q *application.ApplicationDeleteReq
 	defer s.projectLock.RUnlock(a.Spec.Project)
 
 	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionDelete, a.RBACName(s.ns)); err != nil {
+		return nil, err
+	}
+	if err := s.enforceDestinations(ctx, a.Spec.GetProject(), a.Spec.Destinations, rbac.ActionDelete); err != nil {
 		return nil, err
 	}
 
@@ -1379,6 +1476,11 @@ func (s *Server) validateAndNormalizeApp(ctx context.Context, app *v1alpha1.Appl
 		}
 	}
 
+	conditions = argo.ValidateMultiDestinationGate(&app.Spec, s.settingsMgr)
+	if len(conditions) > 0 {
+		return status.Errorf(codes.InvalidArgument, "application spec for %s is invalid: %s", app.Name, argo.FormatAppConditions(conditions))
+	}
+
 	conditions, err = argo.ValidatePermissions(ctx, &app.Spec, proj, s.db)
 	if err != nil {
 		return fmt.Errorf("error validating project permissions: %w", err)
@@ -1397,8 +1499,16 @@ func (s *Server) validateAndNormalizeApp(ctx context.Context, app *v1alpha1.Appl
 	return nil
 }
 
-func (s *Server) getApplicationClusterConfig(ctx context.Context, a *v1alpha1.Application, p *v1alpha1.AppProject) (*rest.Config, error) {
-	cluster, err := argo.GetDestinationCluster(ctx, a.Spec.Destination, s.db)
+// getApplicationClusterConfig returns a REST config for one of the Application's destinations.
+// destName is the name of a destination in spec.destinations, or argo.PrimaryDestinationName for
+// spec.destination. A resource lives in exactly one destination's cluster, so a caller acting on a
+// live resource must pass that resource's destination rather than defaulting to the primary.
+func (s *Server) getApplicationClusterConfig(ctx context.Context, a *v1alpha1.Application, p *v1alpha1.AppProject, destName string) (*rest.Config, error) {
+	destination, err := a.Spec.GetDestination(destName)
+	if err != nil {
+		return nil, fmt.Errorf("error resolving destination: %w", err)
+	}
+	cluster, err := argo.GetDestinationCluster(ctx, destination, s.db)
 	if err != nil {
 		return nil, fmt.Errorf("error validating destination: %w", err)
 	}
@@ -1416,7 +1526,7 @@ func (s *Server) getApplicationClusterConfig(ctx context.Context, a *v1alpha1.Ap
 		return config, nil
 	}
 
-	serviceAccountToImpersonate, err := settings.DeriveServiceAccountToImpersonate(p, a, cluster)
+	serviceAccountToImpersonate, err := settings.DeriveServiceAccountToImpersonate(p, a, cluster, destination.Namespace)
 	if err != nil {
 		return nil, fmt.Errorf("error deriving service account to impersonate: %w", err)
 	}
@@ -1487,6 +1597,15 @@ func (s *Server) getAppLiveResource(ctx context.Context, action string, q *appli
 		return nil, nil, nil, err
 	}
 
+	// The action a destinations policy is written against: the bare verb, without the per-resource
+	// detail either already on it (a resource action arrives as "action/<group>/<kind>/<name>") or
+	// appended below for fine-grained update and delete. That detail names a resource, not a
+	// destination, so a destinations policy is written against the verb alone.
+	destinationAction := action
+	if i := strings.Index(destinationAction, "/"); i >= 0 {
+		destinationAction = destinationAction[:i]
+	}
+
 	if fineGrainedInheritanceDisabled && (action == rbac.ActionDelete || action == rbac.ActionUpdate) {
 		action = fmt.Sprintf("%s/%s/%s/%s/%s", action, q.GetGroup(), q.GetKind(), q.GetNamespace(), q.GetResourceName())
 	}
@@ -1504,11 +1623,22 @@ func (s *Server) getAppLiveResource(ctx context.Context, action string, q *appli
 		return nil, nil, nil, fmt.Errorf("error getting app resources: %w", err)
 	}
 
-	found := tree.FindNode(q.GetGroup(), q.GetKind(), q.GetNamespace(), q.GetResourceName())
+	found, err := tree.FindNode(q.GetGroup(), q.GetKind(), q.GetNamespace(), q.GetResourceName(), q.GetDestination())
+	if err != nil {
+		return nil, nil, nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 	if found == nil || found.UID == "" {
 		return nil, nil, nil, status.Errorf(codes.InvalidArgument, "%s %s %s not found as part of application %s", q.GetKind(), q.GetGroup(), q.GetResourceName(), q.GetName())
 	}
-	config, err := s.getApplicationClusterConfig(ctx, a, p)
+
+	// The resource's own destination, now that the lookup has established which one it is
+	// unambiguously. Authorizing against the whole set would deny an operation the user is
+	// permitted on the cluster the resource actually lives in.
+	if err := s.enforceDestinations(ctx, a.Spec.GetProject(), destinationsNamed(a, found.Destination), destinationAction); err != nil {
+		return nil, nil, nil, err
+	}
+
+	config, err := s.getApplicationClusterConfig(ctx, a, p, found.Destination)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("error getting application cluster config: %w", err)
 	}
@@ -1564,6 +1694,7 @@ func (s *Server) PatchResource(ctx context.Context, q *application.ApplicationRe
 		Version:      q.Version,
 		Group:        q.Group,
 		Project:      q.Project,
+		Destination:  q.Destination,
 	}
 	res, config, a, err := s.getAppLiveResource(ctx, rbac.ActionUpdate, resourceRequest)
 	if err != nil {
@@ -1607,6 +1738,7 @@ func (s *Server) DeleteResource(ctx context.Context, q *application.ApplicationR
 		Version:      q.Version,
 		Group:        q.Group,
 		Project:      q.Project,
+		Destination:  q.Destination,
 	}
 	res, config, a, err := s.getAppLiveResource(ctx, rbac.ActionDelete, resourceRequest)
 	if err != nil {
@@ -1899,14 +2031,25 @@ func (s *Server) PodLogs(q *application.ApplicationPodLogsQuery, ws application.
 		return fmt.Errorf("error getting app resource tree: %w", err)
 	}
 
-	config, err := s.getApplicationClusterConfig(ws.Context(), a, p)
-	if err != nil {
-		return fmt.Errorf("error getting application cluster config: %w", err)
-	}
-
-	kubeClientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return fmt.Errorf("error creating kube client: %w", err)
+	// One client per destination rather than one for the application: the selected pods may live in
+	// different clusters, and reading them all through the primary destination's client would look
+	// for them in the wrong place. Built on demand so a single-destination application makes exactly
+	// one client, as before.
+	clientsByDestination := map[string]kubernetes.Interface{}
+	clientForDestination := func(destName string) (kubernetes.Interface, error) {
+		if client, ok := clientsByDestination[destName]; ok {
+			return client, nil
+		}
+		config, err := s.getApplicationClusterConfig(ws.Context(), a, p, destName)
+		if err != nil {
+			return nil, fmt.Errorf("error getting application cluster config: %w", err)
+		}
+		client, err := kubernetes.NewForConfig(config)
+		if err != nil {
+			return nil, fmt.Errorf("error creating kube client: %w", err)
+		}
+		clientsByDestination[destName] = client
+		return client, nil
 	}
 
 	// from the tree find pods which match query of kind, group, and resource name
@@ -1927,6 +2070,10 @@ func (s *Server) PodLogs(q *application.ApplicationPodLogsQuery, ws application.
 	var streams []chan logEntry
 
 	for _, pod := range pods {
+		kubeClientset, err := clientForDestination(pod.Destination)
+		if err != nil {
+			return err
+		}
 		stream, err := kubeClientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
 			Container:    q.GetContainer(),
 			Follow:       q.GetFollow(),
@@ -2097,6 +2244,9 @@ func (s *Server) Sync(ctx context.Context, syncReq *application.ApplicationSyncR
 	}
 
 	if err := s.enf.EnforceErr(ctx.Value("claims"), rbac.ResourceApplications, rbac.ActionSync, a.RBACName(s.ns)); err != nil {
+		return nil, err
+	}
+	if err := s.enforceDestinations(ctx, a.Spec.GetProject(), a.Spec.Destinations, rbac.ActionSync); err != nil {
 		return nil, err
 	}
 
@@ -2272,6 +2422,9 @@ func (s *Server) Rollback(ctx context.Context, rollbackReq *application.Applicat
 	}
 	a, _, err := s.getApplicationEnforceRBACClient(ctx, action, rollbackReq.GetProject(), rollbackReq.GetAppNamespace(), rollbackReq.GetName(), "")
 	if err != nil {
+		return nil, err
+	}
+	if err := s.enforceDestinations(ctx, a.Spec.GetProject(), a.Spec.Destinations, action); err != nil {
 		return nil, err
 	}
 
@@ -2519,6 +2672,9 @@ func (s *Server) TerminateOperation(ctx context.Context, termOpReq *application.
 	if err != nil {
 		return nil, err
 	}
+	if err := s.enforceDestinations(ctx, a.Spec.GetProject(), a.Spec.Destinations, rbac.ActionSync); err != nil {
+		return nil, err
+	}
 
 	for range 10 {
 		if a.Operation == nil || a.Status.OperationState == nil {
@@ -2603,7 +2759,7 @@ func (s *Server) getUnstructuredLiveResourceOrApp(ctx context.Context, rbacReque
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
-		config, err = s.getApplicationClusterConfig(ctx, app, p)
+		config, err = s.getApplicationClusterConfig(ctx, app, p, argo.PrimaryDestinationName)
 		if err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("error getting application cluster config: %w", err)
 		}
@@ -2662,6 +2818,7 @@ func (s *Server) RunResourceAction(ctx context.Context, q *application.ResourceA
 		Group:        q.Group,
 		Action:       q.Action,
 		Project:      q.Project,
+		Destination:  q.Destination,
 	}
 	return s.RunResourceActionV2(ctx, qV2)
 }
@@ -2676,6 +2833,7 @@ func (s *Server) RunResourceActionV2(ctx context.Context, q *application.Resourc
 		Version:      q.Version,
 		Group:        q.Group,
 		Project:      q.Project,
+		Destination:  q.Destination,
 	}
 	actionRequest := fmt.Sprintf("%s/%s/%s/%s", rbac.ActionAction, q.GetGroup(), q.GetKind(), q.GetAction())
 	liveObj, res, a, config, err := s.getUnstructuredLiveResourceOrApp(ctx, actionRequest, resourceRequest)

@@ -30,10 +30,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/argoproj/argo-cd/v3/common"
+	mockstatecache "github.com/argoproj/argo-cd/v3/controller/cache/mocks"
 	"github.com/argoproj/argo-cd/v3/controller/testdata"
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v3/reposerver/apiclient"
 	"github.com/argoproj/argo-cd/v3/test"
+	"github.com/argoproj/argo-cd/v3/util/argo"
 	argodiff "github.com/argoproj/argo-cd/v3/util/argo/diff"
 	"github.com/argoproj/argo-cd/v3/util/argo/normalizers"
 )
@@ -97,7 +99,7 @@ func TestHideSecretData_SSDPathReusesMainDiff(t *testing.T) {
 		managedResources: []managedResource{mr},
 		diffConfig:       buildSSADiffConfig(t),
 	}
-	items, err := ctrl.hideSecretData(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app, compRes)
+	items, err := ctrl.hideSecretData(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), app, compRes)
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	assert.False(t, items[0].Modified)
@@ -124,7 +126,7 @@ func TestHideSecretData_SSDPathCreateRecomputes(t *testing.T) {
 		managedResources: []managedResource{mr},
 		diffConfig:       buildSSADiffConfig(t),
 	}
-	items, err := ctrl.hideSecretData(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app, compRes)
+	items, err := ctrl.hideSecretData(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), app, compRes)
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	assert.True(t, items[0].Modified)
@@ -160,7 +162,7 @@ func TestHideSecretData_SSDPathMasksSensitiveAnnotations(t *testing.T) {
 		managedResources: []managedResource{mr},
 		diffConfig:       buildSSADiffConfig(t),
 	}
-	items, err := ctrl.hideSecretData(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app, compRes)
+	items, err := ctrl.hideSecretData(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), app, compRes)
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	assert.False(t, items[0].Modified)
@@ -193,7 +195,7 @@ func TestHideSecretData_SSDPathMasksReusedSecretData(t *testing.T) {
 		managedResources: []managedResource{mr},
 		diffConfig:       buildSSADiffConfig(t),
 	}
-	items, err := ctrl.hideSecretData(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app, compRes)
+	items, err := ctrl.hideSecretData(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), app, compRes)
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	assert.False(t, items[0].Modified)
@@ -222,7 +224,7 @@ func TestHideSecretData_NonSSDRecomputes(t *testing.T) {
 	compRes := &comparisonResult{
 		managedResources: []managedResource{mr},
 	}
-	items, err := ctrl.hideSecretData(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app, compRes)
+	items, err := ctrl.hideSecretData(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), app, compRes)
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	assert.True(t, items[0].Modified)
@@ -1144,7 +1146,7 @@ func TestSetManagedResourcesWithOrphanedResources(t *testing.T) {
 		},
 	}, nil)
 
-	tree, err := ctrl.setAppManagedResources(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app, &comparisonResult{managedResources: make([]managedResource, 0)})
+	tree, err := ctrl.setAppManagedResources(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), []string{argo.PrimaryDestinationName}, app, &comparisonResult{managedResources: make([]managedResource, 0)})
 
 	require.NoError(t, err)
 	assert.Len(t, tree.OrphanedNodes, 1)
@@ -1173,7 +1175,7 @@ func TestSetManagedResourcesWithResourcesOfAnotherApp(t *testing.T) {
 		},
 	}, nil)
 
-	tree, err := ctrl.setAppManagedResources(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app1, &comparisonResult{managedResources: make([]managedResource, 0)})
+	tree, err := ctrl.setAppManagedResources(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), []string{argo.PrimaryDestinationName}, app1, &comparisonResult{managedResources: make([]managedResource, 0)})
 
 	require.NoError(t, err)
 	assert.Empty(t, tree.OrphanedNodes)
@@ -1226,7 +1228,7 @@ func TestSetManagedResourcesKnownOrphanedResourceExceptions(t *testing.T) {
 		},
 	}, nil)
 
-	tree, err := ctrl.setAppManagedResources(t.Context(), &v1alpha1.Cluster{Server: "test", Name: "test"}, app, &comparisonResult{managedResources: make([]managedResource, 0)})
+	tree, err := ctrl.setAppManagedResources(t.Context(), singleDest(&v1alpha1.Cluster{Server: "test", Name: "test"}), []string{argo.PrimaryDestinationName}, app, &comparisonResult{managedResources: make([]managedResource, 0)})
 
 	require.NoError(t, err)
 	assert.Len(t, tree.OrphanedNodes, 1)
@@ -2789,4 +2791,269 @@ func Test_EvaluateAppRevisionsChanges(t *testing.T) {
 			assert.Equal(t, tc.expectedResolvedRevisions, resolvedRevisions)
 		})
 	}
+}
+
+// multiDestPod builds a Pod manifest, optionally annotated for a named destination.
+func multiDestPod(name, destination string) *unstructured.Unstructured {
+	pod := kube.MustToUnstructured(&corev1.Pod{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+	})
+	if destination != "" {
+		pod.SetAnnotations(map[string]string{common.AnnotationKeyDestination: destination})
+	}
+	return pod
+}
+
+// Two destinations on the same cluster but in different namespaces. Cheap to set up, and enough to
+// exercise routing and attribution, though not a shape an Application may actually declare
+// while still exercising per-destination routing, namespacing and tagging.
+func TestCompareAppStateMultipleDestinations(t *testing.T) {
+	t.Parallel()
+
+	app := newFakeApp()
+	// Two destinations on one cluster, which ValidateDistinctDestinations rejects -- CompareAppState
+	// does not run that validation, so this still exercises routing and attribution. The
+	// distinct-cluster shape a real Application has is covered by
+	// TestCompareAppStateDistinctClusters.
+	app.Spec.Destinations = []v1alpha1.NamedDestination{{
+		Name:      "other",
+		Server:    app.Spec.Destination.Server,
+		Namespace: "other-ns",
+	}}
+
+	data := fakeData{
+		manifestResponse: &apiclient.ManifestResponse{
+			Manifests: []string{
+				toJSON(t, multiDestPod("primary-pod", "")),
+				toJSON(t, multiDestPod("other-pod", "other")),
+			},
+			Namespace: test.FakeDestNamespace,
+			Server:    test.FakeClusterURL,
+			Revision:  "abc123",
+		},
+		managedLiveObjs: make(map[kube.ResourceKey]*unstructured.Unstructured),
+	}
+	ctrl := newFakeController(t.Context(), &data, nil)
+
+	compRes, err := ctrl.appStateManager.CompareAppState(
+		t.Context(), app, &defaultProj, []string{""}, []v1alpha1.ApplicationSource{app.Spec.GetSource()}, false, false, nil, false)
+	require.NoError(t, err)
+	require.NotNil(t, compRes)
+
+	// Both destinations were compared, primary first.
+	assert.Equal(t, []string{argo.PrimaryDestinationName, "other"}, compRes.destOrder)
+	require.Len(t, compRes.perDestination, 2)
+
+	byName := map[string]v1alpha1.ResourceStatus{}
+	for _, r := range compRes.resources {
+		byName[r.Name] = r
+	}
+	require.Contains(t, byName, "primary-pod")
+	require.Contains(t, byName, "other-pod")
+
+	// Each resource is attributed to the destination that its annotation selected.
+	assert.Equal(t, argo.PrimaryDestinationName, byName["primary-pod"].Destination)
+	assert.Equal(t, "other", byName["other-pod"].Destination)
+
+	// And defaulted into that destination's namespace, not the application's.
+	assert.Equal(t, test.FakeDestNamespace, byName["primary-pod"].Namespace)
+	assert.Equal(t, "other-ns", byName["other-pod"].Namespace)
+
+	// managedResources carry the same attribution, which is what the sync stage routes on.
+	for _, mr := range compRes.managedResources {
+		switch mr.Name {
+		case "primary-pod":
+			assert.Equal(t, argo.PrimaryDestinationName, mr.Destination)
+		case "other-pod":
+			assert.Equal(t, "other", mr.Destination)
+		}
+	}
+}
+
+func TestCompareAppStateUndeclaredDestination(t *testing.T) {
+	t.Parallel()
+
+	app := newFakeApp()
+	data := fakeData{
+		manifestResponse: &apiclient.ManifestResponse{
+			Manifests: []string{toJSON(t, multiDestPod("stray-pod", "nope"))},
+			Namespace: test.FakeDestNamespace,
+			Server:    test.FakeClusterURL,
+			Revision:  "abc123",
+		},
+		managedLiveObjs: make(map[kube.ResourceKey]*unstructured.Unstructured),
+	}
+	ctrl := newFakeController(t.Context(), &data, nil)
+
+	compRes, err := ctrl.appStateManager.CompareAppState(
+		t.Context(), app, &defaultProj, []string{""}, []v1alpha1.ApplicationSource{app.Spec.GetSource()}, false, false, nil, false)
+	require.NoError(t, err)
+	require.NotNil(t, compRes)
+
+	// The resource must not be silently routed to the primary destination.
+	assert.Empty(t, compRes.managedResources)
+
+	// It must be reported, and the app must fail closed rather than claim a sync status.
+	var found bool
+	for _, c := range app.Status.Conditions {
+		if c.Type == v1alpha1.ApplicationConditionInvalidSpecError && strings.Contains(c.Message, "nope") {
+			found = true
+		}
+	}
+	assert.True(t, found, "expected an InvalidSpecError naming the undeclared destination, got %v", app.Status.Conditions)
+	assert.Equal(t, v1alpha1.SyncStatusCodeUnknown, compRes.syncStatus.Status)
+}
+
+// singleDest builds the one-entry destination map that a single-destination application produces.
+func singleDest(c *v1alpha1.Cluster) map[string]argo.ResolvedDestination {
+	return map[string]argo.ResolvedDestination{
+		argo.PrimaryDestinationName: {Name: argo.PrimaryDestinationName, Cluster: c},
+	}
+}
+
+func TestWarnOnDivergentCapabilities(t *testing.T) {
+	t.Parallel()
+
+	primaryCluster := &v1alpha1.Cluster{Server: "https://primary"}
+	otherCluster := &v1alpha1.Cluster{Server: "https://other"}
+
+	resolved := map[string]argo.ResolvedDestination{
+		argo.PrimaryDestinationName: {Name: argo.PrimaryDestinationName, Cluster: primaryCluster},
+		"other":                     {Name: "other", Cluster: otherCluster},
+	}
+	order := []string{argo.PrimaryDestinationName, "other"}
+
+	t.Run("no warning for a single destination", func(t *testing.T) {
+		t.Parallel()
+		m := &appStateManager{liveStateCache: &mockstatecache.LiveStateCache{}}
+		assert.Empty(t, m.warnOnDivergentCapabilities(resolved, []string{argo.PrimaryDestinationName}, metav1.Now()))
+	})
+
+	t.Run("no warning when destinations agree", func(t *testing.T) {
+		t.Parallel()
+		lsc := &mockstatecache.LiveStateCache{}
+		lsc.EXPECT().GetVersionsInfo(primaryCluster).Return("v1.30.0", nil, nil).Maybe()
+		lsc.EXPECT().GetVersionsInfo(otherCluster).Return("v1.30.0", nil, nil).Maybe()
+		m := &appStateManager{liveStateCache: lsc}
+		assert.Empty(t, m.warnOnDivergentCapabilities(resolved, order, metav1.Now()))
+	})
+
+	t.Run("warns when a destination runs a different version", func(t *testing.T) {
+		t.Parallel()
+		lsc := &mockstatecache.LiveStateCache{}
+		lsc.EXPECT().GetVersionsInfo(primaryCluster).Return("v1.30.0", nil, nil).Maybe()
+		lsc.EXPECT().GetVersionsInfo(otherCluster).Return("v1.26.4", nil, nil).Maybe()
+		m := &appStateManager{liveStateCache: lsc}
+
+		conditions := m.warnOnDivergentCapabilities(resolved, order, metav1.Now())
+		require.Len(t, conditions, 1)
+		assert.Equal(t, v1alpha1.ApplicationConditionMultipleDestinationsWarning, conditions[0].Type)
+		assert.Contains(t, conditions[0].Message, "v1.30.0")
+		assert.Contains(t, conditions[0].Message, `"other" is v1.26.4`)
+	})
+
+	t.Run("an unreadable version is not reported as divergence", func(t *testing.T) {
+		t.Parallel()
+		lsc := &mockstatecache.LiveStateCache{}
+		lsc.EXPECT().GetVersionsInfo(primaryCluster).Return("v1.30.0", nil, nil).Maybe()
+		lsc.EXPECT().GetVersionsInfo(otherCluster).Return("", nil, errors.New("cluster unreachable")).Maybe()
+		m := &appStateManager{liveStateCache: lsc}
+
+		// Unreachable clusters are surfaced by the comparison itself; adding a capability warning
+		// on top would be misleading noise.
+		assert.Empty(t, m.warnOnDivergentCapabilities(resolved, order, metav1.Now()))
+	})
+}
+
+// TestCompareAppStateDistinctClusters is the shape a real multi-destination Application has, and the
+// one the end-to-end tests exercise: each destination is a different cluster, and each cluster holds
+// only the resources routed to it. The mock returns per-cluster live objects, because a single live
+// set for every cluster cannot represent that.
+func TestCompareAppStateDistinctClusters(t *testing.T) {
+	t.Parallel()
+
+	const secondServer = "https://second.example.com"
+
+	secondClusterSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "second-cluster-secret",
+			Namespace: test.FakeArgoCDNamespace,
+			Labels:    map[string]string{"argocd.argoproj.io/secret-type": "cluster"},
+		},
+		Data: map[string][]byte{
+			"name":   []byte("second"),
+			"server": []byte(secondServer),
+			"config": []byte(`{"bearerToken":"fake","tlsClientConfig":{"insecure":true},"awsAuthConfig":null}`),
+		},
+	}
+
+	app := newFakeApp()
+	app.Spec.Destinations = []v1alpha1.NamedDestination{{
+		Name:      "other",
+		Server:    secondServer,
+		Namespace: "other-ns",
+	}}
+
+	// Live objects have to look like what a sync would have left behind, tracking annotation and
+	// all: without it isSelfReferencedObj rejects them and every resource reads as OutOfSync.
+	primaryPod := multiDestPod("primary-pod", "")
+	primaryPod.SetNamespace(test.FakeDestNamespace)
+	primaryPod.SetAnnotations(map[string]string{
+		common.AnnotationKeyAppInstance: app.Name + ":/Pod:" + test.FakeDestNamespace + "/primary-pod",
+	})
+	otherPod := multiDestPod("other-pod", "other")
+	otherPod.SetNamespace("other-ns")
+	otherPod.SetAnnotations(map[string]string{
+		common.AnnotationKeyDestination: "other",
+		common.AnnotationKeyAppInstance: app.Name + ":/Pod:other-ns/other-pod",
+	})
+
+	data := fakeData{
+		manifestResponse: &apiclient.ManifestResponse{
+			Manifests: []string{
+				toJSON(t, multiDestPod("primary-pod", "")),
+				toJSON(t, multiDestPod("other-pod", "other")),
+			},
+			Namespace: test.FakeDestNamespace,
+			Server:    test.FakeClusterURL,
+			Revision:  "abc123",
+		},
+		additionalObjs: []runtime.Object{secondClusterSecret},
+		// Each cluster holds exactly the resource routed to it, as it would after a successful sync.
+		managedLiveObjsByCluster: map[string]map[kube.ResourceKey]*unstructured.Unstructured{
+			test.FakeClusterURL: {kube.GetResourceKey(primaryPod): primaryPod},
+			secondServer:        {kube.GetResourceKey(otherPod): otherPod},
+		},
+	}
+	ctrl := newFakeController(t.Context(), &data, nil)
+
+	compRes, err := ctrl.appStateManager.CompareAppState(
+		t.Context(), app, &defaultProj, []string{""}, []v1alpha1.ApplicationSource{app.Spec.GetSource()}, false, false, nil, false)
+	require.NoError(t, err)
+	require.NotNil(t, compRes)
+
+	assert.Equal(t, []string{argo.PrimaryDestinationName, "other"}, compRes.destOrder)
+
+	byName := map[string]v1alpha1.ResourceStatus{}
+	for _, r := range compRes.resources {
+		byName[r.Name] = r
+	}
+	require.Contains(t, byName, "primary-pod")
+	require.Contains(t, byName, "other-pod")
+
+	assert.Equal(t, argo.PrimaryDestinationName, byName["primary-pod"].Destination)
+	assert.Equal(t, "other", byName["other-pod"].Destination)
+
+	// Neither resource may be marked for pruning. A destination that saw the other's live objects
+	// would find them unmatched by any of its own targets and prune them, which is what deploying to
+	// two clusters must never do.
+	for name, res := range byName {
+		assert.False(t, res.RequiresPruning, "%s must not be marked for pruning", name)
+	}
+
+	// The named destination is compared against its own cluster: the resource routed there is found
+	// live and reads as Synced. Compared against the primary cluster, where it does not exist, it
+	// would read as OutOfSync forever.
+	assert.Equal(t, v1alpha1.SyncStatusCodeSynced, byName["other-pod"].Status)
 }

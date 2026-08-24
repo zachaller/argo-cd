@@ -702,7 +702,19 @@ func ValidatePermissions(ctx context.Context, spec *argoappv1.ApplicationSpec, p
 		}
 	}
 
-	destCluster, err := GetDestinationCluster(ctx, spec.Destination, db)
+	for _, msg := range ValidateDestinationNames(spec.Destinations) {
+		conditions = append(conditions, argoappv1.ApplicationCondition{
+			Type:    argoappv1.ApplicationConditionInvalidSpecError,
+			Message: msg,
+		})
+	}
+	if len(conditions) > 0 && spec.HasMultipleDestinations() {
+		// Names are the key every later step resolves against, so there is nothing useful to check
+		// until they are valid.
+		return conditions, nil
+	}
+
+	resolved, order, err := ResolveDestinations(ctx, spec, db)
 	if err != nil {
 		conditions = append(conditions, argoappv1.ApplicationCondition{
 			Type:    argoappv1.ApplicationConditionInvalidSpecError,
@@ -710,20 +722,42 @@ func ValidatePermissions(ctx context.Context, spec *argoappv1.ApplicationSpec, p
 		})
 		return conditions, nil
 	}
-	permitted, err := proj.IsDestinationPermitted(destCluster, spec.Destination.Namespace, func(project string) ([]*argoappv1.Cluster, error) {
-		return db.GetProjectClusters(ctx, project)
-	})
-	if err != nil {
-		return nil, err
+
+	for _, msg := range ValidateDistinctDestinations(resolved, order) {
+		conditions = append(conditions, argoappv1.ApplicationCondition{
+			Type:    argoappv1.ApplicationConditionInvalidSpecError,
+			Message: msg,
+		})
 	}
-	if !permitted {
-		server := destCluster.Server
-		if spec.Destination.Name != "" {
-			server = destCluster.Name
+
+	projectClusters := func(project string) ([]*argoappv1.Cluster, error) {
+		return db.GetProjectClusters(ctx, project)
+	}
+	// Every destination the application may deploy to must be permitted by the project, not just
+	// the primary one.
+	for _, name := range order {
+		dest := resolved[name]
+		permitted, err := proj.IsDestinationPermitted(dest.Cluster, dest.Destination.Namespace, projectClusters)
+		if err != nil {
+			return nil, err
+		}
+		if permitted {
+			continue
+		}
+		server := dest.Cluster.Server
+		if dest.Destination.Name != "" {
+			server = dest.Cluster.Name
+		}
+		if name == PrimaryDestinationName {
+			conditions = append(conditions, argoappv1.ApplicationCondition{
+				Type:    argoappv1.ApplicationConditionInvalidSpecError,
+				Message: fmt.Sprintf("application destination server '%s' and namespace '%s' do not match any of the allowed destinations in project '%s'", server, dest.Destination.Namespace, proj.Name),
+			})
+			continue
 		}
 		conditions = append(conditions, argoappv1.ApplicationCondition{
 			Type:    argoappv1.ApplicationConditionInvalidSpecError,
-			Message: fmt.Sprintf("application destination server '%s' and namespace '%s' do not match any of the allowed destinations in project '%s'", server, spec.Destination.Namespace, proj.Name),
+			Message: fmt.Sprintf("application destination %q server '%s' and namespace '%s' do not match any of the allowed destinations in project '%s'", name, server, dest.Destination.Namespace, proj.Name),
 		})
 	}
 	return conditions, nil

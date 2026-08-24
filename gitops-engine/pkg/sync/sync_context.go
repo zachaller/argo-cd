@@ -112,6 +112,36 @@ func WithInitialState(phase common.OperationPhase, message string, results []com
 }
 
 // WithResourcesFilter sets sync operation resources filter
+// WithSyncTaskFilter sets a filter applied to sync tasks after they have been built, when each
+// task's phase and wave are known. Returning false holds the task back for this sync; it is not
+// failed or skipped, and will be considered again on the next call to Sync.
+//
+// This exists because WithResourcesFilter cannot express a phase- or wave-based decision: it is
+// consulted per resource, before tasks are built, and one resource may expand into tasks in several
+// phases. A caller coordinating several sync contexts uses this to keep them in step, by holding
+// back every task beyond the wave the slowest context has reached.
+func WithSyncTaskFilter(syncTaskFilter func(phase common.SyncPhase, wave int) bool) SyncOpt {
+	return func(ctx *syncContext) {
+		ctx.syncTaskFilter = syncTaskFilter
+	}
+}
+
+// WithForceSyncFailPhase makes the sync run its SyncFail hooks and fail with the given reason even
+// though none of this context's own tasks failed. An empty reason leaves the behaviour unchanged.
+//
+// The SyncFail phase normally triggers only on a task of this context failing, which is not enough
+// for a caller driving several sync contexts as one operation: when one of them fails the others
+// have nothing of their own to trigger on, so their SyncFail hooks never run and whatever they
+// applied is left uncleaned. Such a caller sets this on the contexts that did not themselves fail.
+//
+// The reason is carried rather than a bare bool because only the caller knows why: the context
+// being failed has no failed task to derive a message from.
+func WithForceSyncFailPhase(reason string) SyncOpt {
+	return func(ctx *syncContext) {
+		ctx.forceSyncFailPhaseReason = reason
+	}
+}
+
 func WithResourcesFilter(resourcesFilter func(key kubeutil.ResourceKey, target *unstructured.Unstructured, live *unstructured.Unstructured) bool) SyncOpt {
 	return func(ctx *syncContext) {
 		ctx.resourcesFilter = resourcesFilter
@@ -405,6 +435,8 @@ type syncContext struct {
 	validate                        bool
 	skipHooks                       bool
 	resourcesFilter                 func(key kubeutil.ResourceKey, target *unstructured.Unstructured, live *unstructured.Unstructured) bool
+	syncTaskFilter                  func(phase common.SyncPhase, wave int) bool
+	forceSyncFailPhaseReason        string
 	prune                           bool
 	replace                         bool
 	serverSideApply                 bool
@@ -651,9 +683,16 @@ func (sc *syncContext) Sync(ctx context.Context) {
 
 	// if there are any completed but unsuccessful tasks, sync is a failure.
 	// we already know tasks do not contain running tasks
-	if tasks.Any(func(t *syncTask) bool { return t.completed() && !t.successful() }) {
+	ownTasksFailed := tasks.Any(func(t *syncTask) bool { return t.completed() && !t.successful() })
+	if ownTasksFailed || sc.forceSyncFailPhaseReason != "" {
+		message := "one or more synchronization tasks completed unsuccessfully"
+		if !ownTasksFailed {
+			// Nothing here failed, so there is no task message to build a reason from. The caller is
+			// failing this context on another's behalf and is the only one that knows why.
+			message = sc.forceSyncFailPhaseReason
+		}
 		sc.deleteHooks(ctx, hooksPendingDeletionFailed)
-		sc.executeSyncFailPhase(ctx, syncFailTasks, syncFailedTasks, "one or more synchronization tasks completed unsuccessfully")
+		sc.executeSyncFailPhase(ctx, syncFailTasks, syncFailedTasks, message)
 		return
 	}
 
@@ -665,9 +704,30 @@ func (sc *syncContext) Sync(ctx context.Context) {
 		tasks = sc.filterOutOfSyncTasks(tasks)
 	}
 
+	// Let the caller hold tasks back. This runs on pending tasks only, and after syncFailTasks have
+	// been split out, so failure handling is never delayed by it.
+	heldBack := false
+	if sc.syncTaskFilter != nil {
+		allowed := syncTasks{}
+		for _, t := range tasks {
+			if sc.syncTaskFilter(t.phase, t.wave()) {
+				allowed = append(allowed, t)
+			} else {
+				heldBack = true
+			}
+		}
+		tasks = allowed
+	}
+
 	// If no sync tasks were generated (e.g., in case all application manifests have been removed),
 	// the sync operation is successful.
 	if len(tasks) == 0 {
+		if heldBack {
+			// There is outstanding work; the caller is holding it back. Staying Running is what
+			// distinguishes this from a finished sync, so the caller can release it on a later pass.
+			sc.setOperationPhase(common.OperationRunning, "waiting for held back tasks")
+			return
+		}
 		// delete all completed hooks which have appropriate delete policy
 		sc.deleteHooks(ctx, hooksPendingDeletionSuccessful)
 		sc.setOperationPhase(common.OperationSucceeded, "successfully synced (no more tasks)")

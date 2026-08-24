@@ -532,6 +532,9 @@ function renderPodGroup(
                             'application-resource-tree__node-status-icon--offset': rootNode
                         })}>
                         {node.hook && <i title='Resource lifecycle hook' className='fa fa-anchor' />}
+                        {/* Marks a resource that is not in the Application's primary destination. Absent for
+                            single-destination Applications, whose resources all carry an empty destination. */}
+                        {node.destination && <i title={`Deployed to destination "${node.destination}"`} className='fa fa-server' />}
                         {healthState != null && <HealthStatusIcon state={healthState} />}
                         {comparisonStatus != null && <ComparisonStatusIcon status={comparisonStatus} resource={!rootNode && node} />}
                         {appNode && !rootNode && (

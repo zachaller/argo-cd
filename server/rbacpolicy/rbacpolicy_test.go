@@ -241,3 +241,28 @@ func Test_getProjectFromRequest(t *testing.T) {
 		})
 	}
 }
+
+func TestGetProjectFromRequest_Destinations(t *testing.T) {
+	projLister := test.NewFakeProjLister(newFakeProj())
+	rbacEnf := NewRBACPolicyEnforcer(nil, projLister)
+
+	// The destinations object is <project>/<destination-name>, so the project must still be
+	// recoverable from the first segment for project-scoped tokens to work.
+	proj := rbacEnf.getProjectFromRequest("foo", rbac.ResourceDestinations, "sync", "my-proj/prod")
+	require.NotNil(t, proj)
+	assert.Equal(t, "my-proj", proj.Name)
+}
+
+func TestDestinationsPolicyDoesNotAffectApplications(t *testing.T) {
+	projLister := test.NewFakeProjLister(newFakeProj())
+	enf := rbac.NewEnforcer(fake.NewClientset(), test.FakeArgoCDNamespace, common.ArgoCDConfigMapName, nil)
+	enf.SetDefaultRole("role:readonly")
+	rbacEnf := NewRBACPolicyEnforcer(enf, projLister)
+	enf.SetClaimsEnforcerFunc(rbacEnf.EnforceClaims)
+
+	// An exact per-app policy must keep working: the applications object string is unchanged by
+	// the addition of the destinations resource.
+	require.NoError(t, enf.SetUserPolicy("p, alice, applications, sync, my-proj/my-app, allow"))
+	claims := jwt.MapClaims{"sub": "alice"}
+	assert.True(t, enf.Enforce(claims, rbac.ResourceApplications, rbac.ActionSync, "my-proj/my-app"))
+}

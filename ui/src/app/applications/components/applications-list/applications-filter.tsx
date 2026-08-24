@@ -60,6 +60,20 @@ export function getAutoSyncStatus(syncPolicy?: SyncPolicy) {
 // Deleting and Terminated states are grouped under the "Syncing" filter option in the UI
 // (see combinedSyncingCount in getOperationOptions). Normalize them so the filter matches
 // the count shown in the badge.
+// Every cluster an Application deploys to: spec.destination plus each entry in spec.destinations.
+// An Application with named destinations belongs under more than one cluster, so both the CLUSTERS
+// option list and the match predicate have to read this rather than spec.destination alone --
+// otherwise a cluster appears in the dropdown that matches nothing, or the app is missing from a
+// cluster it genuinely deploys to. NamedDestination names the cluster in `clusterName`, because its
+// own `name` identifies the destination within the Application.
+const appDestinationClusters = (app: Application): ApplicationDestination[] => [
+    app.spec.destination,
+    // ApplicationDestination requires all three fields; NamedDestination leaves them optional, so
+    // the absent one is coerced to ''. Both consumers below treat '' as "not specified": the URL
+    // comparison never matches it, and the name comparison short-circuits on the falsy value.
+    ...(app.spec.destinations || []).map(dest => ({server: dest.server || '', name: dest.clusterName || '', namespace: dest.namespace || ''}))
+];
+
 function getOperationStateTitleForFilter(app: Application): OperationStateTitle {
     const title = getOperationStateTitle(app);
     if (title === OperationStateTitles.Deleting || title === OperationStateTitles.Terminated) {
@@ -87,18 +101,18 @@ export function getAppFilterResults(applications: Application[], pref: AppsListP
                 favourite: !pref.showFavorites || (pref.favoritesAppList && pref.favoritesAppList.includes(app.metadata.name)),
                 clusters:
                     pref.clustersFilter.length === 0 ||
-                    pref.clustersFilter.some(filterString => {
-                        const match = filterString.match('^(.*) [(](http.*)[)]$');
-                        if (match?.length === 3) {
-                            const [, name, url] = match;
-                            return url === app.spec.destination.server || name === app.spec.destination.name;
-                        } else {
-                            const inputMatch = filterString.match('^http.*$');
-                            return (
-                                (inputMatch && inputMatch[0] === app.spec.destination.server) || (app.spec.destination.name && minimatch(app.spec.destination.name, filterString))
-                            );
-                        }
-                    }),
+                    pref.clustersFilter.some(filterString =>
+                        appDestinationClusters(app).some(dest => {
+                            const match = filterString.match('^(.*) [(](http.*)[)]$');
+                            if (match?.length === 3) {
+                                const [, name, url] = match;
+                                return url === dest.server || name === dest.name;
+                            } else {
+                                const inputMatch = filterString.match('^http.*$');
+                                return (inputMatch && inputMatch[0] === dest.server) || (dest.name && minimatch(dest.name, filterString));
+                            }
+                        })
+                    ),
                 repos:
                     pref.reposFilter.length === 0 || pref.reposFilter.some(repoURL => getAppAllSources(app).some(source => source.repoURL && minimatch(source.repoURL, repoURL))),
                 targetRevision:
@@ -352,7 +366,11 @@ const ClusterFilter = React.memo((props: AppFilterProps) => {
 
     const [clusters, loading, error] = useData(() => services.clusters.list());
     const clusterOptions = React.useMemo(
-        () => optionsFrom(Array.from(new Set(props.apps.map(app => getClusterDetail(app.spec.destination, clusters)).filter(item => !!item))), props.pref.clustersFilter),
+        () =>
+            optionsFrom(
+                Array.from(new Set(props.apps.flatMap(app => appDestinationClusters(app).map(dest => getClusterDetail(dest, clusters))).filter(item => !!item))),
+                props.pref.clustersFilter
+            ),
         [props.apps, clusters, props.pref.clustersFilter]
     );
 

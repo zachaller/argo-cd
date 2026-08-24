@@ -44,6 +44,16 @@ export interface PodGroup extends Partial<ResourceNode> {
     renderQuickStarts?: () => ReactNode;
     fullName?: string;
     hostLabels?: {[name: string]: string};
+    // Identity of the group within this view. It is not fullName, which is the resource a click
+    // navigates to and is deliberately unset for node groups.
+    groupKey?: string;
+}
+
+// Node names are unique only within a cluster, so a node group is identified by the destination as
+// well. Every host and every pod of a single-destination Application carries an empty destination,
+// so the key stays the bare node name there.
+function hostGroupKey(destination: string | undefined, nodeName: string): string {
+    return destination ? `${nodeName}@${destination}` : nodeName;
 }
 
 export function PodView(props: PodViewProps) {
@@ -119,7 +129,9 @@ export function PodView(props: PodViewProps) {
                                         return null;
                                     }
                                     return (
-                                        <div className={`pod-view__node white-box ${group.kind === 'node' && 'pod-view__node--large'}`} key={group.fullName || group.name}>
+                                        <div
+                                            className={`pod-view__node white-box ${group.kind === 'node' && 'pod-view__node--large'}`}
+                                            key={group.groupKey || group.fullName || group.name}>
                                             <div
                                                 className='pod-view__node__container--header'
                                                 onClick={() => props.onItemClick(group.fullName)}
@@ -132,6 +144,7 @@ export function PodView(props: PodViewProps) {
                                                     </div>
                                                     <div style={{lineHeight: '15px'}}>
                                                         <b style={{wordWrap: 'break-word'}}>{group.name || 'Unknown'}</b>
+                                                        {group.destination && <div className='pod-view__node__destination'>{group.destination}</div>}
                                                         {group.resourceStatus && (
                                                             <div>
                                                                 {group.resourceStatus.health && <HealthStatusIcon state={group.resourceStatus.health} />}
@@ -317,11 +330,12 @@ function processTree(
     if (sortMode === 'node' && initNodes) {
         initNodes.forEach(infraNode => {
             const nodeName = infraNode.name;
-            groupRefs[nodeName] = {
+            groupRefs[hostGroupKey(infraNode.destination, nodeName)] = {
                 ...infraNode,
                 type: 'node',
                 kind: 'node',
                 name: nodeName,
+                groupKey: hostGroupKey(infraNode.destination, nodeName),
                 pods: [],
                 info: [
                     {name: 'Kernel Version', value: infraNode.systemInfo.kernelVersion},
@@ -382,8 +396,11 @@ function processTree(
         });
 
         if (sortMode === 'node') {
-            if (groupRefs[p.spec.nodeName]) {
-                const curNode = groupRefs[p.spec.nodeName];
+            // The pod's own destination, so a pod is never attached to a same-named node in
+            // another cluster.
+            const hostKey = hostGroupKey(rnode.destination, p.spec.nodeName);
+            if (groupRefs[hostKey]) {
+                const curNode = groupRefs[hostKey];
                 curNode.pods.push(p);
             } else {
                 if (groupRefs.Unschedulable) {
@@ -432,7 +449,7 @@ function processTree(
     Object.values(groupRefs).forEach(group => group.pods.sort((first, second) => nodeKey(first).localeCompare(nodeKey(second), undefined, {numeric: true})));
 
     return Object.values(groupRefs)
-        .sort((a, b) => (a.name > b.name ? 1 : a.name === b.name ? 0 : -1)) // sort by name
+        .sort((a, b) => (a.name > b.name ? 1 : a.name === b.name ? (a.destination || '').localeCompare(b.destination || '') : -1)) // sort by name, then destination
         .filter(i => (i.pods || []).length > 0); // filter out groups with no pods
 }
 

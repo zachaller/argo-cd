@@ -27,6 +27,7 @@ import (
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/argoproj/argo-cd/v3/reposerver/apiclient"
 	"github.com/argoproj/argo-cd/v3/test"
+	"github.com/argoproj/argo-cd/v3/util/argo"
 	"github.com/argoproj/argo-cd/v3/util/argo/diff"
 	"github.com/argoproj/argo-cd/v3/util/argo/normalizers"
 	"github.com/argoproj/argo-cd/v3/util/settings"
@@ -388,7 +389,7 @@ func TestSyncWindowDeniesSync(t *testing.T) {
 
 func TestNormalizeTargetResources(t *testing.T) {
 	type fixture struct {
-		comparisonResult *comparisonResult
+		comparisonResult *destinationComparison
 	}
 	setup := func(t *testing.T, ignores []v1alpha1.ResourceIgnoreDifferences) *fixture {
 		t.Helper()
@@ -400,7 +401,7 @@ func TestNormalizeTargetResources(t *testing.T) {
 		live := test.YamlToUnstructured(testdata.LiveDeploymentYaml)
 		target := test.YamlToUnstructured(testdata.TargetDeploymentYaml)
 		return &fixture{
-			&comparisonResult{
+			&destinationComparison{
 				reconciliationResult: sync.ReconciliationResult{
 					Live:   []*unstructured.Unstructured{live},
 					Target: []*unstructured.Unstructured{target},
@@ -545,7 +546,7 @@ func TestNormalizeTargetResources(t *testing.T) {
 
 func TestNormalizeTargetResourcesWithList(t *testing.T) {
 	type fixture struct {
-		comparisonResult *comparisonResult
+		comparisonResult *destinationComparison
 	}
 	setupHTTPProxy := func(t *testing.T, ignores []v1alpha1.ResourceIgnoreDifferences) *fixture {
 		t.Helper()
@@ -557,7 +558,7 @@ func TestNormalizeTargetResourcesWithList(t *testing.T) {
 		live := test.YamlToUnstructured(testdata.LiveHTTPProxy)
 		target := test.YamlToUnstructured(testdata.TargetHTTPProxy)
 		return &fixture{
-			&comparisonResult{
+			&destinationComparison{
 				reconciliationResult: sync.ReconciliationResult{
 					Live:   []*unstructured.Unstructured{live},
 					Target: []*unstructured.Unstructured{target},
@@ -778,7 +779,7 @@ func TestNormalizeTargetResourcesWithList(t *testing.T) {
 
 func TestNormalizeTargetResourcesCRDs(t *testing.T) {
 	type fixture struct {
-		comparisonResult *comparisonResult
+		comparisonResult *destinationComparison
 	}
 	setupHTTPProxy := func(t *testing.T, ignores []v1alpha1.ResourceIgnoreDifferences) *fixture {
 		t.Helper()
@@ -790,7 +791,7 @@ func TestNormalizeTargetResourcesCRDs(t *testing.T) {
 		live := test.YamlToUnstructured(testdata.SimpleAppLiveYaml)
 		target := test.YamlToUnstructured(testdata.SimpleAppTargetYaml)
 		return &fixture{
-			&comparisonResult{
+			&destinationComparison{
 				reconciliationResult: sync.ReconciliationResult{
 					Live:   []*unstructured.Unstructured{live},
 					Target: []*unstructured.Unstructured{target},
@@ -940,7 +941,7 @@ func TestNormalizeTargetResourcesCRDs(t *testing.T) {
 		// Load target child Application (desired state with chart version 0.45.29)
 		target := test.YamlToUnstructured(testdata.TargetChildApplicationYaml)
 
-		comparisonResult := &comparisonResult{
+		comparisonResult := &destinationComparison{
 			reconciliationResult: sync.ReconciliationResult{
 				Live:   []*unstructured.Unstructured{live},
 				Target: []*unstructured.Unstructured{target},
@@ -978,7 +979,7 @@ func TestNormalizeTargetResourcesCRDs(t *testing.T) {
 // RespectIgnoreDifferences=true is set, normalizeTargetResources should only patch the
 // ignored field — not clobber the entire selector due to patchStrategy:"replace".
 func TestNormalizeTargetResourcesPDBSelector(t *testing.T) {
-	setupPDB := func(t *testing.T, ignores []v1alpha1.ResourceIgnoreDifferences) *comparisonResult {
+	setupPDB := func(t *testing.T, ignores []v1alpha1.ResourceIgnoreDifferences) *destinationComparison {
 		t.Helper()
 		dc, err := diff.NewDiffConfigBuilder().
 			WithDiffSettings(ignores, nil, true, normalizers.IgnoreNormalizerOpts{}).
@@ -987,7 +988,7 @@ func TestNormalizeTargetResourcesPDBSelector(t *testing.T) {
 		require.NoError(t, err)
 		live := test.YamlToUnstructured(testdata.LivePDBYaml)
 		target := test.YamlToUnstructured(testdata.TargetPDBYaml)
-		return &comparisonResult{
+		return &destinationComparison{
 			reconciliationResult: sync.ReconciliationResult{
 				Live:   []*unstructured.Unstructured{live},
 				Target: []*unstructured.Unstructured{target},
@@ -1176,7 +1177,7 @@ func TestDeriveServiceAccountMatchingNamespaces(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 		assert.Equal(t, expectedSA, sa)
 		assert.NoError(t, err)
 	})
@@ -1198,7 +1199,7 @@ func TestDeriveServiceAccountMatchingNamespaces(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 
 		// then, there should be no error and should use the right service account for impersonation
 		require.NoError(t, err)
@@ -1237,7 +1238,7 @@ func TestDeriveServiceAccountMatchingNamespaces(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 
 		// then, there should be no error and should use the right service account for impersonation
 		require.NoError(t, err)
@@ -1276,7 +1277,7 @@ func TestDeriveServiceAccountMatchingNamespaces(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 
 		// then, there should be no error and it should use the first matching service account for impersonation
 		require.NoError(t, err)
@@ -1310,7 +1311,7 @@ func TestDeriveServiceAccountMatchingNamespaces(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 
 		// then, there should not be any error and should use the first matching glob pattern service account for impersonation
 		require.NoError(t, err)
@@ -1344,7 +1345,7 @@ func TestDeriveServiceAccountMatchingNamespaces(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 
 		require.NoError(t, err)
 		assert.Equal(t, expectedSA, sa)
@@ -1371,7 +1372,7 @@ func TestDeriveServiceAccountMatchingNamespaces(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 
 		// then, there should not be any error and the service account configured for with empty namespace should be used.
 		require.NoError(t, err)
@@ -1405,7 +1406,7 @@ func TestDeriveServiceAccountMatchingNamespaces(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 
 		// then, there should not be any error and the catch all service account should be returned
 		require.NoError(t, err)
@@ -1429,7 +1430,7 @@ func TestDeriveServiceAccountMatchingNamespaces(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 
 		// then, there must be an error as the glob pattern is invalid.
 		require.ErrorContains(t, err, "invalid glob pattern for destination namespace")
@@ -1463,7 +1464,7 @@ func TestDeriveServiceAccountMatchingNamespaces(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 		assert.Equal(t, expectedSA, sa)
 
 		// then, there should not be any error and the service account with its namespace should be returned.
@@ -1491,7 +1492,7 @@ func TestDeriveServiceAccountMatchingNamespaces(t *testing.T) {
 		f.application.Spec.Destination.Name = f.cluster.Name
 
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 		assert.Equal(t, expectedSA, sa)
 
 		// then, there should not be any error and the service account with its namespace should be returned.
@@ -1574,7 +1575,7 @@ func TestDeriveServiceAccountMatchingServers(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 
 		// then, there should not be any error and the right service account must be returned.
 		require.NoError(t, err)
@@ -1613,7 +1614,7 @@ func TestDeriveServiceAccountMatchingServers(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 
 		// then, there should not be any error and first matching service account should be used
 		require.NoError(t, err)
@@ -1647,7 +1648,7 @@ func TestDeriveServiceAccountMatchingServers(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 		assert.Equal(t, expectedSA, sa)
 
 		// then, there should not be any error and the service account of the glob pattern, being the first match should be returned.
@@ -1681,7 +1682,7 @@ func TestDeriveServiceAccountMatchingServers(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, &v1alpha1.Cluster{Server: destinationServerURL})
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, &v1alpha1.Cluster{Server: destinationServerURL}, f.application.Spec.Destination.Namespace)
 
 		// then, there an error with appropriate message must be returned
 		require.NoError(t, err)
@@ -1715,7 +1716,7 @@ func TestDeriveServiceAccountMatchingServers(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 
 		// then, there should not be any error and the service account of the glob pattern match must be returned.
 		require.NoError(t, err)
@@ -1739,7 +1740,7 @@ func TestDeriveServiceAccountMatchingServers(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 
 		// then, there must be an error as the glob pattern is invalid.
 		require.ErrorContains(t, err, "invalid glob pattern for destination server")
@@ -1773,7 +1774,7 @@ func TestDeriveServiceAccountMatchingServers(t *testing.T) {
 
 		f := setup(destinationServiceAccounts, destinationNamespace, destinationServerURL, applicationNamespace)
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, &v1alpha1.Cluster{Server: destinationServerURL})
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, &v1alpha1.Cluster{Server: destinationServerURL}, f.application.Spec.Destination.Namespace)
 
 		// then, there should not be any error and the service account with the given namespace prefix must be returned.
 		require.NoError(t, err)
@@ -1801,7 +1802,7 @@ func TestDeriveServiceAccountMatchingServers(t *testing.T) {
 		f.application.Spec.Destination.Name = f.cluster.Name
 
 		// when
-		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster)
+		sa, err := settings.DeriveServiceAccountToImpersonate(f.project, f.application, f.cluster, f.application.Spec.Destination.Namespace)
 		assert.Equal(t, expectedSA, sa)
 
 		// then, there should not be any error and the service account with its namespace should be returned.
@@ -2441,4 +2442,296 @@ func TestValidateSyncPermissions(t *testing.T) {
 
 		assert.NoError(t, err)
 	})
+}
+
+func TestMergeOperationPhase(t *testing.T) {
+	t.Parallel()
+
+	// An operation is only as successful as its least successful destination.
+	assert.Equal(t, synccommon.OperationError,
+		mergeOperationPhase(synccommon.OperationSucceeded, synccommon.OperationError))
+	assert.Equal(t, synccommon.OperationError,
+		mergeOperationPhase(synccommon.OperationFailed, synccommon.OperationError))
+	assert.Equal(t, synccommon.OperationRunning,
+		mergeOperationPhase(synccommon.OperationSucceeded, synccommon.OperationRunning))
+
+	// A destination that has not finished outranks one that has, even a failed one. Reporting the
+	// operation terminal here would abandon the unfinished destination's work -- including SyncFail
+	// hooks it has started because of that very failure. The failed destination stays failed on the
+	// next pass, so the operation still ends up failed once every destination has settled.
+	assert.Equal(t, synccommon.OperationRunning,
+		mergeOperationPhase(synccommon.OperationRunning, synccommon.OperationFailed))
+	assert.Equal(t, synccommon.OperationRunning,
+		mergeOperationPhase(synccommon.OperationError, synccommon.OperationRunning))
+
+	// Succeeded only survives when every destination succeeded.
+	assert.Equal(t, synccommon.OperationSucceeded,
+		mergeOperationPhase(synccommon.OperationSucceeded, synccommon.OperationSucceeded))
+
+	// The zero phase means "nothing merged yet" and must never win.
+	assert.Equal(t, synccommon.OperationSucceeded,
+		mergeOperationPhase("", synccommon.OperationSucceeded))
+	assert.Equal(t, synccommon.OperationError,
+		mergeOperationPhase("", synccommon.OperationError))
+}
+
+func TestSyncStepOrdering(t *testing.T) {
+	t.Parallel()
+
+	presync0 := syncStep{phase: synccommon.SyncPhasePreSync, wave: 0}
+	sync0 := syncStep{phase: synccommon.SyncPhaseSync, wave: 0}
+	sync1 := syncStep{phase: synccommon.SyncPhaseSync, wave: 1}
+	postsync0 := syncStep{phase: synccommon.SyncPhasePostSync, wave: 0}
+
+	// Phase dominates wave: a late wave of PreSync still precedes an early wave of Sync.
+	assert.True(t, presync0.before(sync0))
+	assert.True(t, syncStep{phase: synccommon.SyncPhasePreSync, wave: 99}.before(sync0))
+	assert.True(t, sync1.before(postsync0))
+
+	// Within a phase, waves order normally, including negative ones.
+	assert.True(t, sync0.before(sync1))
+	assert.True(t, syncStep{phase: synccommon.SyncPhaseSync, wave: -5}.before(sync0))
+
+	// Ordering is strict, so a step never precedes itself.
+	assert.False(t, sync0.before(sync0))
+}
+
+func TestSyncScheduleAndFrontier(t *testing.T) {
+	t.Parallel()
+
+	obj := func(wave string, hook string) *unstructured.Unstructured {
+		u := kube.MustToUnstructured(&corev1.Pod{
+			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+			ObjectMeta: metav1.ObjectMeta{Name: "p"},
+		})
+		annots := map[string]string{}
+		if wave != "" {
+			annots[synccommon.AnnotationSyncWave] = wave
+		}
+		if hook != "" {
+			annots[synccommon.AnnotationKeyHook] = hook
+		}
+		u.SetAnnotations(annots)
+		return u
+	}
+
+	// One destination has an early wave the other lacks, and the other has a later wave. The
+	// schedule is the union, so neither can run ahead of the other.
+	perDest := map[string]*destinationComparison{
+		argo.PrimaryDestinationName: {reconciliationResult: sync.ReconciliationResult{
+			Target: []*unstructured.Unstructured{obj("0", ""), obj("2", "")},
+		}},
+		"other": {reconciliationResult: sync.ReconciliationResult{
+			Target: []*unstructured.Unstructured{obj("1", "")},
+		}},
+	}
+	schedule := syncSchedule(perDest, []string{argo.PrimaryDestinationName, "other"})
+	require.Len(t, schedule, 3)
+	assert.Equal(t, []syncStep{
+		{phase: synccommon.SyncPhaseSync, wave: 0},
+		{phase: synccommon.SyncPhaseSync, wave: 1},
+		{phase: synccommon.SyncPhaseSync, wave: 2},
+	}, schedule)
+
+	// A fresh operation starts at the first step of the schedule.
+	start, ok := frontierStep(&v1alpha1.SyncOperationResult{}, schedule)
+	require.True(t, ok)
+	assert.Equal(t, schedule[0], start)
+
+	// A recorded frontier is resumed rather than restarted.
+	resumed, ok := frontierStep(&v1alpha1.SyncOperationResult{
+		WaveFrontier: &v1alpha1.SyncWaveFrontier{Phase: string(synccommon.SyncPhaseSync), Wave: 1},
+	}, schedule)
+	require.True(t, ok)
+	assert.Equal(t, syncStep{phase: synccommon.SyncPhaseSync, wave: 1}, resumed)
+
+	// Advancing walks the schedule and stops at the end.
+	next, ok := nextFrontier(schedule, schedule[0])
+	require.True(t, ok)
+	assert.Equal(t, schedule[1], next)
+	_, ok = nextFrontier(schedule, schedule[2])
+	assert.False(t, ok, "there is nothing after the last step")
+
+	// An empty schedule yields no frontier, so an application with nothing to sync is not held.
+	_, ok = frontierStep(&v1alpha1.SyncOperationResult{}, nil)
+	assert.False(t, ok)
+}
+
+func TestDestinationStepsIncludesHookPhases(t *testing.T) {
+	t.Parallel()
+
+	presyncHook := kube.MustToUnstructured(&corev1.Pod{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+		ObjectMeta: metav1.ObjectMeta{Name: "hook"},
+	})
+	presyncHook.SetAnnotations(map[string]string{
+		synccommon.AnnotationKeyHook:  string(synccommon.HookTypePreSync),
+		synccommon.AnnotationSyncWave: "4",
+	})
+
+	syncFailHook := presyncHook.DeepCopy()
+	syncFailHook.SetAnnotations(map[string]string{
+		synccommon.AnnotationKeyHook: string(synccommon.HookTypeSyncFail),
+	})
+
+	dc := &destinationComparison{reconciliationResult: sync.ReconciliationResult{
+		Hooks: []*unstructured.Unstructured{presyncHook, syncFailHook},
+	}}
+	steps := destinationSteps(dc)
+
+	assert.True(t, steps[syncStep{phase: synccommon.SyncPhasePreSync, wave: 4}],
+		"a PreSync hook contributes a PreSync step at its wave")
+
+	// SyncFail runs only after a failure, so it must never enter the schedule; a frontier that
+	// waited on it would stall every destination.
+	for step := range steps {
+		assert.NotEqual(t, synccommon.SyncPhaseSyncFail, step.phase)
+	}
+}
+
+func TestForcedSyncFailReason(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, `destination "prod" failed to sync`, forcedSyncFailReason("prod"))
+	// The primary destination has no name to quote.
+	assert.Equal(t, "the primary destination failed to sync", forcedSyncFailReason(argo.PrimaryDestinationName))
+}
+
+func TestHasSyncFailHooks(t *testing.T) {
+	t.Parallel()
+
+	hook := func(hookType synccommon.HookType) *unstructured.Unstructured {
+		u := kube.MustToUnstructured(&corev1.Pod{
+			TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Pod"},
+			ObjectMeta: metav1.ObjectMeta{Name: "hook"},
+		})
+		u.SetAnnotations(map[string]string{synccommon.AnnotationKeyHook: string(hookType)})
+		return u
+	}
+
+	withHooks := func(hooks ...*unstructured.Unstructured) *destinationComparison {
+		return &destinationComparison{reconciliationResult: sync.ReconciliationResult{Hooks: hooks}}
+	}
+
+	assert.True(t, hasSyncFailHooks(withHooks(hook(synccommon.HookTypeSyncFail))))
+	assert.True(t, hasSyncFailHooks(withHooks(hook(synccommon.HookTypePreSync), hook(synccommon.HookTypeSyncFail))))
+
+	// Only SyncFail counts: forcing a destination whose hooks all run on the happy path would
+	// report it as failed when it in fact applied cleanly.
+	assert.False(t, hasSyncFailHooks(withHooks(hook(synccommon.HookTypePreSync))))
+	assert.False(t, hasSyncFailHooks(withHooks()))
+	assert.False(t, hasSyncFailHooks(withHooks(nil)))
+	assert.False(t, hasSyncFailHooks(nil))
+}
+
+func TestDestinationFailed(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, destinationFailed(synccommon.OperationFailed))
+	assert.True(t, destinationFailed(synccommon.OperationError))
+
+	// A destination that is still working has not failed, however badly it may end up.
+	assert.False(t, destinationFailed(synccommon.OperationRunning))
+	assert.False(t, destinationFailed(synccommon.OperationTerminating))
+	assert.False(t, destinationFailed(synccommon.OperationSucceeded))
+}
+
+// TestSyncAppStateDistinctClustersDoesNotCrossPrune is the sync-side counterpart of
+// TestCompareAppStateDistinctClusters. The comparison already attributes each resource to exactly
+// one destination; what this pins down is that the sync does too.
+//
+// The failure it was written for: with one resource per destination, both already live in their own
+// cluster, an end-to-end run produced two results for each resource -- Synced from the destination
+// that owns it and Pruned from the other. Both resources were created and then deleted inside a
+// single operation, so nothing survived.
+func TestSyncAppStateDistinctClustersDoesNotCrossPrune(t *testing.T) {
+	t.Parallel()
+
+	const secondServer = "https://second.example.com"
+
+	secondClusterSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "second-cluster-secret",
+			Namespace: test.FakeArgoCDNamespace,
+			Labels:    map[string]string{"argocd.argoproj.io/secret-type": "cluster"},
+		},
+		Data: map[string][]byte{
+			"name":   []byte("second"),
+			"server": []byte(secondServer),
+			"config": []byte(`{"bearerToken":"fake","tlsClientConfig":{"insecure":true},"awsAuthConfig":null}`),
+		},
+	}
+
+	app := newFakeApp()
+	app.Status.OperationState = nil
+	app.Spec.Destinations = []v1alpha1.NamedDestination{{
+		Name:      "other",
+		Server:    secondServer,
+		Namespace: "other-ns",
+	}}
+
+	defaultProject := &v1alpha1.AppProject{
+		ObjectMeta: metav1.ObjectMeta{Namespace: test.FakeArgoCDNamespace, Name: "default"},
+		Spec: v1alpha1.AppProjectSpec{
+			SourceRepos:  []string{"*"},
+			Destinations: []v1alpha1.ApplicationDestination{{Server: "*", Namespace: "*"}},
+		},
+	}
+
+	// Each cluster holds exactly the resource routed to it, tracking annotation and all, as it
+	// would after a successful sync. Without the annotation isSelfReferencedObj rejects the object.
+	primaryPod := multiDestPod("primary-pod", "")
+	primaryPod.SetNamespace(test.FakeDestNamespace)
+	primaryPod.SetAnnotations(map[string]string{
+		common.AnnotationKeyAppInstance: app.Name + ":/Pod:" + test.FakeDestNamespace + "/primary-pod",
+	})
+	otherPod := multiDestPod("other-pod", "other")
+	otherPod.SetNamespace("other-ns")
+	otherPod.SetAnnotations(map[string]string{
+		common.AnnotationKeyDestination: "other",
+		common.AnnotationKeyAppInstance: app.Name + ":/Pod:other-ns/other-pod",
+	})
+
+	data := fakeData{
+		apps: []runtime.Object{app, defaultProject},
+		manifestResponse: &apiclient.ManifestResponse{
+			Manifests: []string{
+				toJSON(t, multiDestPod("primary-pod", "")),
+				toJSON(t, multiDestPod("other-pod", "other")),
+			},
+			Namespace: test.FakeDestNamespace,
+			Server:    test.FakeClusterURL,
+			Revision:  "abc123",
+		},
+		additionalObjs: []runtime.Object{secondClusterSecret},
+		managedLiveObjsByCluster: map[string]map[kube.ResourceKey]*unstructured.Unstructured{
+			test.FakeClusterURL: {kube.GetResourceKey(primaryPod): primaryPod},
+			secondServer:        {kube.GetResourceKey(otherPod): otherPod},
+		},
+	}
+	ctrl := newFakeController(t.Context(), &data, nil)
+
+	opState := &v1alpha1.OperationState{Operation: v1alpha1.Operation{
+		Sync: &v1alpha1.SyncOperation{Prune: true},
+	}}
+	ctrl.appStateManager.SyncAppState(t.Context(), app, defaultProject, opState)
+
+	require.NotNil(t, opState.SyncResult)
+	for _, res := range opState.SyncResult.Resources {
+		t.Logf("result %s/%s destination=%q status=%s message=%q", res.Namespace, res.Name, res.Destination, res.Status, res.Message)
+	}
+
+	// A resource belongs to one destination, so it must produce one result. Two results for the
+	// same resource means a destination acted on a resource that is not its own.
+	countByName := map[string]int{}
+	destByName := map[string][]string{}
+	for _, res := range opState.SyncResult.Resources {
+		countByName[res.Name]++
+		destByName[res.Name] = append(destByName[res.Name], res.Destination)
+		assert.NotEqual(t, synccommon.ResultCodePruned, res.Status,
+			"%s/%s was pruned by destination %q; each destination must ignore the other's resources",
+			res.Namespace, res.Name, res.Destination)
+	}
+	assert.Equal(t, 1, countByName["primary-pod"], "primary-pod produced results from destinations %v", destByName["primary-pod"])
+	assert.Equal(t, 1, countByName["other-pod"], "other-pod produced results from destinations %v", destByName["other-pod"])
 }

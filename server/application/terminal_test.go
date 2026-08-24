@@ -9,6 +9,7 @@ import (
 
 	"github.com/argoproj/argo-cd/gitops-engine/v3/pkg/utils/kube"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -76,10 +77,59 @@ func TestPodExists(t *testing.T) {
 		},
 	} {
 		t.Run(tcase.name, func(t *testing.T) {
-			result := podExists(tcase.treeNodes, tcase.podName, tcase.namespace)
-			assert.Equalf(t, tcase.expectedResult, result, "Expected result %v, but got %v", tcase.expectedResult, result)
+			found, err := findPodNode(tcase.treeNodes, tcase.podName, tcase.namespace, "")
+			require.NoError(t, err)
+			assert.Equalf(t, tcase.expectedResult, found != nil, "Expected result %v, but got %v", tcase.expectedResult, found != nil)
 		})
 	}
+}
+
+// A pod is looked up in the destination it is in, so a terminal opens in the cluster the pod
+// actually runs in rather than in spec.destination.
+func TestFindPodNodeByDestination(t *testing.T) {
+	pod := func(destination string) appv1.ResourceNode {
+		return appv1.ResourceNode{ResourceRef: appv1.ResourceRef{
+			Name: "test-pod", Namespace: "test", UID: "uid-" + destination, Kind: kube.PodKind, Destination: destination,
+		}}
+	}
+	primary := pod("")
+	second := pod("second")
+
+	t.Run("named destination is selected", func(t *testing.T) {
+		found, err := findPodNode([]appv1.ResourceNode{primary, second}, "test-pod", "test", "second")
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, "second", found.Destination)
+	})
+
+	t.Run("@primary selects the primary destination", func(t *testing.T) {
+		found, err := findPodNode([]appv1.ResourceNode{primary, second}, "test-pod", "test", appv1.PrimaryDestinationSelector)
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Empty(t, found.Destination)
+	})
+
+	t.Run("no selector resolves a pod that exists in one destination only", func(t *testing.T) {
+		found, err := findPodNode([]appv1.ResourceNode{second}, "test-pod", "test", "")
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, "second", found.Destination)
+	})
+
+	// Opening a shell in the wrong cluster is worse than refusing to open one, so an ambiguous
+	// lookup is an error rather than whichever node came first.
+	t.Run("no selector is ambiguous when the pod exists in both", func(t *testing.T) {
+		found, err := findPodNode([]appv1.ResourceNode{primary, second}, "test-pod", "test", "")
+		require.Error(t, err)
+		assert.Nil(t, found)
+		assert.Contains(t, err.Error(), "more than one destination")
+	})
+
+	t.Run("a destination the pod is not in finds nothing", func(t *testing.T) {
+		found, err := findPodNode([]appv1.ResourceNode{primary}, "test-pod", "test", "second")
+		require.NoError(t, err)
+		assert.Nil(t, found)
+	})
 }
 
 func TestContainerRunning(t *testing.T) {
@@ -328,6 +378,16 @@ func TestTerminalHandler_ServeHTTP_empty_params(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestTerminalHandler_ServeHTTP_invalid_destination(t *testing.T) {
+	handler := terminalHandler{namespace: "argocd"}
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "https://argocd.example.com/api/v1/terminal?pod=valid&container=valid&appName=valid&projectName=valid&namespace=valid&destination=bad/name", http.NoBody)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	response := recorder.Result()
+	assert.Equal(t, http.StatusBadRequest, response.StatusCode)
+	assert.Equal(t, "Destination name is not valid\n", recorder.Body.String())
 }
 
 func TestTerminalHandler_ServeHTTP_disallowed_namespace(t *testing.T) {

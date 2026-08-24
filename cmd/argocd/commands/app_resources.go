@@ -35,6 +35,7 @@ import (
 func NewApplicationGetResourceCommand(clientOpts *argocdclient.ClientOptions) *cobra.Command {
 	var (
 		resourceName      string
+		destination       string
 		kind              string
 		group             string
 		project           string
@@ -96,6 +97,13 @@ func NewApplicationGetResourceCommand(clientOpts *argocdclient.ClientOptions) *c
 			if (resourceName != "" && r.Name != resourceName) || (group != "" && r.Group != group) || r.Kind != kind {
 				continue
 			}
+			// --destination narrows which copies are printed; without it every destination's copy is.
+			if !v1alpha1.DestinationSelectorMatches(destination, r.Destination) {
+				continue
+			}
+			// Each request names the destination of the node it came from, so a resource that exists
+			// in several is fetched from each in turn rather than rejected as ambiguous.
+			nodeDestination := v1alpha1.DestinationSelectorFor(r.Destination)
 			resource, err := appIf.GetResource(ctx, &applicationpkg.ApplicationResourceRequest{
 				Name:         &appName,
 				AppNamespace: &appNs,
@@ -105,6 +113,7 @@ func NewApplicationGetResourceCommand(clientOpts *argocdclient.ClientOptions) *c
 				Project:      &project,
 				ResourceName: &r.Name,
 				Version:      &r.Version,
+				Destination:  &nodeDestination,
 			})
 			errors.CheckError(err)
 			manifest := resource.GetManifest()
@@ -130,6 +139,7 @@ func NewApplicationGetResourceCommand(clientOpts *argocdclient.ClientOptions) *c
 	})
 	command.Flags().StringVarP(&appNamespace, "app-namespace", "N", "", "Namespace of the application")
 	command.Flags().StringVar(&resourceName, "resource-name", "", "Name of resource, if none is included will output details of all resources with specified kind")
+	command.Flags().StringVar(&destination, "destination", "", "Destination the resource is in, when the application deploys to more than one and the same resource exists in several. Use \"@primary\" for spec.destination, otherwise a name from spec.destinations")
 	command.Flags().StringVar(&kind, "kind", "", "Kind of resource [REQUIRED]")
 	err := command.MarkFlagRequired("kind")
 	errors.CheckError(err)
@@ -292,6 +302,7 @@ func NewApplicationPatchResourceCommand(clientOpts *argocdclient.ClientOptions) 
 		patch        string
 		patchType    string
 		resourceName string
+		destination  string
 		namespace    string
 		kind         string
 		group        string
@@ -309,6 +320,7 @@ func NewApplicationPatchResourceCommand(clientOpts *argocdclient.ClientOptions) 
 	errors.CheckError(err)
 	command.Flags().StringVar(&patchType, "patch-type", string(types.MergePatchType), "Which Patching strategy to use: 'application/json-patch+json', 'application/merge-patch+json', or 'application/strategic-merge-patch+json'. Defaults to 'application/merge-patch+json'")
 	command.Flags().StringVar(&resourceName, "resource-name", "", "Name of resource")
+	command.Flags().StringVar(&destination, "destination", "", "Destination the resource is in, when the application deploys to more than one and the same resource exists in several. Use \"@primary\" for spec.destination, otherwise a name from spec.destinations")
 	command.Flags().StringVar(&kind, "kind", "", "Kind")
 	err = command.MarkFlagRequired("kind")
 	errors.CheckError(err)
@@ -332,7 +344,7 @@ func NewApplicationPatchResourceCommand(clientOpts *argocdclient.ClientOptions) 
 			AppNamespace:    &appNs,
 		})
 		errors.CheckError(err)
-		objectsToPatch, err := util.FilterResources(command.Flags().Changed("group"), resources.Items, group, kind, namespace, resourceName, all)
+		objectsToPatch, err := util.FilterResources(command.Flags().Changed("group"), resources.Items, group, kind, namespace, resourceName, destination, all)
 		errors.CheckError(err)
 		for i := range objectsToPatch {
 			obj := objectsToPatch[i]
@@ -348,6 +360,7 @@ func NewApplicationPatchResourceCommand(clientOpts *argocdclient.ClientOptions) 
 				Patch:        new(patch),
 				PatchType:    new(patchType),
 				Project:      new(project),
+				Destination:  new(destination),
 			})
 			errors.CheckError(err)
 			log.Infof("Resource '%s' patched", obj.GetName())
@@ -360,6 +373,7 @@ func NewApplicationPatchResourceCommand(clientOpts *argocdclient.ClientOptions) 
 func NewApplicationDeleteResourceCommand(clientOpts *argocdclient.ClientOptions) *cobra.Command {
 	var (
 		resourceName string
+		destination  string
 		namespace    string
 		kind         string
 		group        string
@@ -375,6 +389,7 @@ func NewApplicationDeleteResourceCommand(clientOpts *argocdclient.ClientOptions)
 	}
 
 	command.Flags().StringVar(&resourceName, "resource-name", "", "Name of resource")
+	command.Flags().StringVar(&destination, "destination", "", "Destination the resource is in, when the application deploys to more than one and the same resource exists in several. Use \"@primary\" for spec.destination, otherwise a name from spec.destinations")
 	command.Flags().StringVarP(&appNamespace, "app-namespace", "N", "", "Namespace of the application")
 	command.Flags().StringVar(&kind, "kind", "", "Kind")
 	err := command.MarkFlagRequired("kind")
@@ -401,7 +416,7 @@ func NewApplicationDeleteResourceCommand(clientOpts *argocdclient.ClientOptions)
 			AppNamespace:    &appNs,
 		})
 		errors.CheckError(err)
-		objectsToDelete, err := util.FilterResources(command.Flags().Changed("group"), resources.Items, group, kind, namespace, resourceName, all)
+		objectsToDelete, err := util.FilterResources(command.Flags().Changed("group"), resources.Items, group, kind, namespace, resourceName, destination, all)
 		errors.CheckError(err)
 
 		promptUtil := utils.NewPrompt(clientOpts.PromptsEnabled)
@@ -423,6 +438,7 @@ func NewApplicationDeleteResourceCommand(clientOpts *argocdclient.ClientOptions)
 					Force:        &force,
 					Orphan:       &orphan,
 					Project:      new(project),
+					Destination:  new(destination),
 				})
 				errors.CheckError(err)
 				log.Infof("Resource '%s' deleted", obj.GetName())

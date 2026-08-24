@@ -586,6 +586,15 @@ const (
 	impersonationEnforcedKey = "application.sync.impersonation.enforced"
 	// requireOverridePrivilegeForRevisionSyncKey is the key to configure whether giving an external revision during sync is considered an override
 	requireOverridePrivilegeForRevisionSyncKey = "application.sync.requireOverridePrivilegeForRevisionSync"
+	// multiDestinationEnabledKey is the key to configure whether an Application may declare additional
+	// named destinations in spec.destinations
+	multiDestinationEnabledKey = "application.destinations.enabled"
+	// destinationRBACEnabledKey is the key to configure whether RBAC is additionally enforced against
+	// the "destinations" resource for every destination an operation touches
+	destinationRBACEnabledKey = "application.destinations.rbac.enabled"
+	// destinationRBACEnforcedKey is the key to configure whether an operation is denied when no
+	// destinations policy matches, once destination RBAC is enabled
+	destinationRBACEnforcedKey = "application.destinations.rbac.enforced"
 )
 
 const (
@@ -600,6 +609,15 @@ const (
 
 	// application sync with impersonation enforcement is enabled by default (applies only when defaultImpersonationEnabledFlag is enabled)
 	defaultImpersonationEnforcedFlag = true
+
+	// multiple destinations per application is disabled by default.
+	defaultMultiDestinationEnabledFlag = false
+
+	// destination RBAC is disabled by default, so that existing policies keep their meaning on upgrade.
+	defaultDestinationRBACEnabledFlag = false
+
+	// destination RBAC fails closed once enabled (applies only when defaultDestinationRBACEnabledFlag is enabled)
+	defaultDestinationRBACEnforcedFlag = true
 
 	// defaultInClusterEnabledFlag is the default value when the in-cluster setting
 	// cannot be read from the configmap or is not explicitly set by the user.
@@ -2871,6 +2889,40 @@ func (mgr *SettingsManager) IsImpersonationEnforced() (bool, error) {
 		return value != "false", nil
 	}
 	return defaultImpersonationEnforcedFlag, nil
+}
+
+// IsMultiDestinationEnabled returns true if Applications may declare additional named destinations
+// in spec.destinations.
+func (mgr *SettingsManager) IsMultiDestinationEnabled() (bool, error) {
+	cm, err := mgr.getConfigMap()
+	if err != nil {
+		return defaultMultiDestinationEnabledFlag, fmt.Errorf("error checking %s property in configmap: %w", multiDestinationEnabledKey, err)
+	}
+	return cm.Data[multiDestinationEnabledKey] == "true", nil
+}
+
+// IsDestinationRBACEnabled returns true if RBAC is additionally enforced against the "destinations"
+// resource for every destination an operation touches. When disabled, destination names never appear
+// in an RBAC request, so existing policies behave exactly as before.
+func (mgr *SettingsManager) IsDestinationRBACEnabled() (bool, error) {
+	cm, err := mgr.getConfigMap()
+	if err != nil {
+		return defaultDestinationRBACEnabledFlag, fmt.Errorf("error checking %s property in configmap: %w", destinationRBACEnabledKey, err)
+	}
+	return cm.Data[destinationRBACEnabledKey] == "true", nil
+}
+
+// IsDestinationRBACEnforced returns true if an operation is denied when no destinations policy
+// matches. It applies only when destination RBAC is enabled.
+func (mgr *SettingsManager) IsDestinationRBACEnforced() (bool, error) {
+	cm, err := mgr.getConfigMap()
+	if err != nil {
+		return defaultDestinationRBACEnforcedFlag, fmt.Errorf("error checking %s property in configmap: %w", destinationRBACEnforcedKey, err)
+	}
+	if value, exists := cm.Data[destinationRBACEnforcedKey]; exists {
+		return value != "false", nil
+	}
+	return defaultDestinationRBACEnforcedFlag, nil
 }
 
 func (mgr *SettingsManager) GetAllowedNodeLabels() []string {

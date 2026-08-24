@@ -625,6 +625,35 @@ jobs:
           sudo chown $(whoami) $HOME/.kube/config
           sudo chmod go-r $HOME/.kube/config
           kubectl version
+      - name: Install a second cluster for multi-destination tests
+        env:
+          K3D_VERSION: v5.8.3
+          K3S_IMAGE_VERSION: ${{ matrix.k3s.version }}
+        run: |
+          set -x
+          # A multi-destination Application needs two genuinely separate clusters. Argo CD reads
+          # live objects once per cluster and attributes them to an Application by an annotation
+          # naming the Application rather than the destination, so two destinations backed by the
+          # same API server would each see the other's resources as extras. k3d runs the second
+          # cluster in Docker, at the same Kubernetes version as the k3s one above, so both
+          # clusters exercise the version this matrix leg is for.
+          curl -sfL "https://raw.githubusercontent.com/k3d-io/k3d/${K3D_VERSION}/install.sh" | TAG="${K3D_VERSION}" bash
+          # --kubeconfig-update-default=false is load-bearing, not tidiness. Argo CD runs outside the
+          # cluster in e2e (ARGOCD_FAKE_IN_CLUSTER=true), so the primary destination -- the in-cluster
+          # address -- is resolved from the default kubeconfig's current context. k3d merges each new
+          # cluster into that file and switches the context to it by default, which silently
+          # repoints the primary destination at this second cluster. Both destinations then share one
+          # API server, each sees the other's resources as unmanaged, and they prune each other.
+          k3d cluster create argocd-e2e-second \
+            --kubeconfig-update-default=false \
+            --kubeconfig-switch-context=false \
+            --image "rancher/k3s:${K3S_IMAGE_VERSION}-k3s1" \
+            --no-lb \
+            --k3s-arg "--disable=traefik@server:0" \
+            --wait
+          k3d kubeconfig get argocd-e2e-second > $HOME/.kube/second-cluster.config
+          chmod go-r $HOME/.kube/second-cluster.config
+          echo "ARGOCD_E2E_SECOND_CLUSTER_KUBECONFIG=$HOME/.kube/second-cluster.config" >> $GITHUB_ENV
       - name: Restore go build and module cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

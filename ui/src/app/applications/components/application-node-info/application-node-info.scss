@@ -36,6 +36,21 @@
         line-height: 14px;
     }
 
+    &__destination {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.5em;
+    }
+
+    &__destination-name {
+        background-color: $argo-color-gray-5;
+        color: white;
+        border-radius: 5px;
+        padding: 2px 6px;
+        line-height: 16px;
+    }
+
     &__checkboxes {
         text-align: right;
         label {

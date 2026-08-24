@@ -24,6 +24,7 @@ argocd app actions run APPNAME ACTION [flags]
 ```
       --all                    Indicates whether to run the action on multiple matching resources
   -N, --app-namespace string   Namespace of the application
+      --destination string     Destination the resource is in, when the application deploys to more than one and the same resource exists in several. Use "@primary" for spec.destination, otherwise a name from spec.destinations
       --group string           Group of the resource on which the action should be run
   -h, --help                   help for run
       --kind string            Kind of the resource on which the action should be run

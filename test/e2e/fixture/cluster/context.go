@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
+
 	"github.com/argoproj/argo-cd/v3/test/e2e/fixture"
 )
 
@@ -17,6 +19,7 @@ type Context struct {
 	upsert      bool
 	namespaces  []string
 	bearerToken string
+	tlsConfig   v1alpha1.TLSClientConfig
 }
 
 func Given(t *testing.T) *Context {
@@ -64,6 +67,13 @@ func (c *Context) Project(project string) *Context {
 
 func (c *Context) BearerToken(bearerToken string) *Context {
 	c.bearerToken = bearerToken
+	return c
+}
+
+// TLSClientConfig sets how Argo CD verifies the cluster's API server. A cluster created for a test
+// has its own self-signed CA, which Argo CD would otherwise reject.
+func (c *Context) TLSClientConfig(tlsConfig v1alpha1.TLSClientConfig) *Context {
+	c.tlsConfig = tlsConfig
 	return c
 }
 

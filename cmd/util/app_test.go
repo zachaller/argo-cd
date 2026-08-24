@@ -566,6 +566,34 @@ func TestConstructBasedOnName(t *testing.T) {
 
 func TestFilterResources(t *testing.T) {
 	t.Parallel()
+	t.Run("Filter by destination", func(t *testing.T) {
+		t.Parallel()
+		// The same Service in the same namespace of two different clusters. Without a destination
+		// these are indistinguishable, and the caller is told to pass --all -- which would act on
+		// both, in two clusters, when one was meant.
+		const svc = "{\"apiVersion\":\"v1\",\"kind\":\"Service\",\"metadata\":{\"name\":\"web\",\"namespace\":\"shared\"}}"
+		resources := []*v1alpha1.ResourceDiff{
+			{LiveState: svc, Destination: ""},
+			{LiveState: svc, Destination: "second"},
+		}
+
+		_, err := FilterResources(false, resources, "g", "Service", "shared", "web", "", false)
+		require.Error(t, err, "both copies match, so the command cannot choose")
+		assert.Contains(t, err.Error(), "multiple resources match")
+
+		named, err := FilterResources(false, resources, "g", "Service", "shared", "web", "second", false)
+		require.NoError(t, err)
+		require.Len(t, named, 1)
+
+		primary, err := FilterResources(false, resources, "g", "Service", "shared", "web", v1alpha1.PrimaryDestinationSelector, false)
+		require.NoError(t, err)
+		require.Len(t, primary, 1)
+
+		_, err = FilterResources(false, resources, "g", "Service", "shared", "web", "absent", false)
+		require.Error(t, err, "a destination the resource is not in must not fall back to another")
+		assert.Contains(t, err.Error(), "no matching resource found")
+	})
+
 	t.Run("Filter by ns", func(t *testing.T) {
 		t.Parallel()
 		resources := []*v1alpha1.ResourceDiff{
@@ -577,7 +605,7 @@ func TestFilterResources(t *testing.T) {
 			},
 		}
 
-		filteredResources, err := FilterResources(false, resources, "g", "Service", "ns", "test-helm-guestbook", true)
+		filteredResources, err := FilterResources(false, resources, "g", "Service", "ns", "test-helm-guestbook", "", true)
 		require.NoError(t, err)
 		assert.Len(t, filteredResources, 1)
 	})
@@ -593,7 +621,7 @@ func TestFilterResources(t *testing.T) {
 			},
 		}
 
-		filteredResources, err := FilterResources(false, resources, "g", "Deployment", "argocd", "test-helm-guestbook", true)
+		filteredResources, err := FilterResources(false, resources, "g", "Deployment", "argocd", "test-helm-guestbook", "", true)
 		require.NoError(t, err)
 		assert.Len(t, filteredResources, 1)
 	})
@@ -609,7 +637,7 @@ func TestFilterResources(t *testing.T) {
 			},
 		}
 
-		filteredResources, err := FilterResources(false, resources, "g", "Service", "argocd", "test-helm", true)
+		filteredResources, err := FilterResources(false, resources, "g", "Service", "argocd", "test-helm", "", true)
 		require.NoError(t, err)
 		assert.Len(t, filteredResources, 1)
 	})
@@ -625,7 +653,7 @@ func TestFilterResources(t *testing.T) {
 			},
 		}
 
-		filteredResources, err := FilterResources(false, resources, "g", "Service", "argocd-unknown", "test-helm", true)
+		filteredResources, err := FilterResources(false, resources, "g", "Service", "argocd-unknown", "test-helm", "", true)
 		require.ErrorContains(t, err, "no matching resource found")
 		assert.Nil(t, filteredResources)
 	})
@@ -641,8 +669,86 @@ func TestFilterResources(t *testing.T) {
 			},
 		}
 
-		filteredResources, err := FilterResources(false, resources, "g", "Service", "argocd", "test-helm", false)
+		filteredResources, err := FilterResources(false, resources, "g", "Service", "argocd", "test-helm", "", false)
 		require.ErrorContains(t, err, "use the --all flag")
 		assert.Nil(t, filteredResources)
 	})
+}
+
+func TestParseNamedDestination(t *testing.T) {
+	t.Parallel()
+
+	t.Run("all fields", func(t *testing.T) {
+		t.Parallel()
+
+		destination, err := parseNamedDestination("name=prod,server=https://prod.example.com,namespace=web")
+		require.NoError(t, err)
+		assert.Equal(t, v1alpha1.NamedDestination{
+			Name:      "prod",
+			Server:    "https://prod.example.com",
+			Namespace: "web",
+		}, destination)
+	})
+
+	t.Run("cluster by symbolic name", func(t *testing.T) {
+		t.Parallel()
+
+		destination, err := parseNamedDestination("name=shared,clusterName=minikube,namespace=infra")
+		require.NoError(t, err)
+		assert.Equal(t, v1alpha1.NamedDestination{
+			Name:        "shared",
+			ClusterName: "minikube",
+			Namespace:   "infra",
+		}, destination)
+	})
+
+	t.Run("a name is required", func(t *testing.T) {
+		t.Parallel()
+
+		// Manifests select a destination by name, so one without a name can never be targeted.
+		_, err := parseNamedDestination("server=https://prod.example.com,namespace=web")
+		require.ErrorContains(t, err, "no name")
+	})
+
+	t.Run("server and clusterName are mutually exclusive", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := parseNamedDestination("name=prod,server=https://prod.example.com,clusterName=minikube")
+		require.ErrorContains(t, err, "both server and clusterName")
+	})
+
+	t.Run("an unknown field is an error", func(t *testing.T) {
+		t.Parallel()
+
+		// Ignoring it would silently produce a destination pointing somewhere other than intended.
+		_, err := parseNamedDestination("name=prod,namesapce=web")
+		require.ErrorContains(t, err, "unknown field")
+	})
+
+	t.Run("a bare value is an error", func(t *testing.T) {
+		t.Parallel()
+
+		_, err := parseNamedDestination("prod")
+		require.ErrorContains(t, err, "key=value")
+	})
+}
+
+func Test_setAppSpecOptionsDestinations(t *testing.T) {
+	f := newAppOptionsFixture()
+
+	require.NoError(t, f.SetFlag("dest", "name=prod,server=https://prod.example.com,namespace=web"))
+	require.Len(t, f.spec.Destinations, 1)
+	assert.Equal(t, "prod", f.spec.Destinations[0].Name)
+	assert.Equal(t, "https://prod.example.com", f.spec.Destinations[0].Server)
+	assert.Equal(t, "web", f.spec.Destinations[0].Namespace)
+
+	// The flag is repeatable, and the whole list is replaced rather than appended to, so that
+	// setting it is how a destination is removed as well as added.
+	require.NoError(t, f.SetFlag("dest", "name=shared,server=https://shared.example.com,namespace=infra"))
+	require.Len(t, f.spec.Destinations, 2)
+	assert.Equal(t, []string{"prod", "shared"},
+		[]string{f.spec.Destinations[0].Name, f.spec.Destinations[1].Name})
+
+	// The primary destination is untouched by --dest.
+	assert.Empty(t, f.spec.Destination.Server)
 }

@@ -37,6 +37,20 @@ function getQuery(projects: string[], isListOfApplications: boolean, options?: Q
     }
 }
 
+// Mirrors DestinationSelectorFor in the API package. A resource in the primary destination carries
+// an empty destination, and empty on the wire already means "no destination given, resolve it if you
+// can" -- so the primary needs a selector of its own. '@' may not appear in a destination name, so
+// this can never collide with one a user chose.
+const PRIMARY_DESTINATION_SELECTOR = '@primary';
+
+// The destination of the node the request came from. Sending it means a resource that exists in two
+// of an application's destinations resolves to the one being looked at, instead of being rejected as
+// ambiguous. For a single-destination application every node is in the primary, so this is exact
+// there too.
+export function destinationSelector(resource: {destination?: string}): string {
+    return resource.destination || PRIMARY_DESTINATION_SELECTOR;
+}
+
 export class ApplicationsService {
     constructor() {}
 
@@ -387,7 +401,8 @@ export class ApplicationsService {
                 resourceName: resource.name,
                 version: resource.version,
                 kind: resource.kind,
-                group: resource.group || '' // The group query param must be present even if empty.
+                group: resource.group || '', // The group query param must be present even if empty.
+                destination: destinationSelector(resource)
             })
             .then(res => res.body as {manifest: string})
             .then(res => JSON.parse(res.manifest) as models.State);
@@ -402,7 +417,8 @@ export class ApplicationsService {
                 resourceName: resource.name,
                 version: resource.version,
                 kind: resource.kind,
-                group: resource.group
+                group: resource.group,
+                destination: destinationSelector(resource)
             })
             .then(res => {
                 const actions = (res.body.actions as models.ResourceAction[]) || [];
@@ -429,7 +445,8 @@ export class ApplicationsService {
                     kind: resource.kind,
                     group: resource.group,
                     resourceActionParameters: resourceActionParameters,
-                    action
+                    action,
+                    destination: destinationSelector(resource)
                 })
             )
             .then(res => (res.body.actions as models.ResourceAction[]) || []);
@@ -446,6 +463,7 @@ export class ApplicationsService {
                 version: resource.version,
                 kind: resource.kind,
                 group: resource.group || '', // The group query param must be present even if empty.
+                destination: destinationSelector(resource),
                 patchType
             })
             .send(JSON.stringify(patch))
@@ -464,6 +482,7 @@ export class ApplicationsService {
                 version: resource.version,
                 kind: resource.kind,
                 group: resource.group || '', // The group query param must be present even if empty.
+                destination: destinationSelector(resource),
                 force,
                 orphan
             })
@@ -526,7 +545,8 @@ export class ApplicationsService {
                 resourceName: resource.name,
                 version: resource.version,
                 kind: resource.kind,
-                group: resource.group || '' // The group query param must be present even if empty.
+                group: resource.group || '', // The group query param must be present even if empty.
+                destination: destinationSelector(resource)
             })
             .send()
             .then(res => {

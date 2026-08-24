@@ -22,6 +22,7 @@ argocd app add-source APPNAME [flags]
   -N, --app-namespace string                       Namespace of the target application where the source will be appended
       --auto-prune                                 Set automatic pruning for automated sync policy
       --config-management-plugin string            Config management plugin name
+      --dest stringArray                           Additional named destination the app may deploy to, which manifests select with the argocd.argoproj.io/destination annotation, as comma separated key=value pairs (can be repeated to set several destinations: --dest name=prod,server=https://prod,namespace=web --dest name=shared,clusterName=minikube,namespace=infra)
       --dest-name string                           K8s cluster Name (e.g. minikube)
       --dest-namespace string                      K8s target namespace
       --dest-server string                         K8s cluster URL (e.g. https://kubernetes.default.svc)

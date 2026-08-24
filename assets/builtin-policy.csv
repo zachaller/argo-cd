@@ -16,6 +16,7 @@ p, role:readonly, projects, get, *, allow
 p, role:readonly, accounts, get, *, allow
 p, role:readonly, gpgkeys, get, *, allow
 p, role:readonly, logs, get, */*, allow
+p, role:readonly, destinations, get, */*, allow
 
 p, role:admin, applications, create, */*, allow
 p, role:admin, applications, update, */*, allow
@@ -49,6 +50,7 @@ p, role:admin, accounts, update, *, allow
 p, role:admin, gpgkeys, create, *, allow
 p, role:admin, gpgkeys, delete, *, allow
 p, role:admin, exec, create, */*, allow
+p, role:admin, destinations, *, */*, allow
 
 g, role:admin, role:readonly
 g, admin, role:admin

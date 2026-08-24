@@ -1028,6 +1028,41 @@ spec:
                       set.
                     type: string
                 type: object
+              destinations:
+                description: |-
+                  Destinations is a list of additional named destinations that individual manifests may target
+                  using the argocd.argoproj.io/destination annotation. Manifests without that annotation are
+                  deployed to Destination.
+                items:
+                  description: |-
+                    NamedDestination is an additional deployment destination of an Application. Individual manifests
+                    select one by name using the argocd.argoproj.io/destination annotation. Manifests without that
+                    annotation are deployed to the Application's spec.destination.
+                  properties:
+                    clusterName:
+                      description: ClusterName is an alternate way of specifying the
+                        target cluster by its symbolic name. This must be set if Server
+                        is not set.
+                      type: string
+                    name:
+                      description: |-
+                        Name uniquely identifies this destination within the Application. It is the value referenced by
+                        the argocd.argoproj.io/destination annotation on a manifest. It must not contain '/' or '@'.
+                      type: string
+                    namespace:
+                      description: |-
+                        Namespace specifies the target namespace for resources routed to this destination.
+                        The namespace will only be set for namespace-scoped resources that have not set a value for .metadata.namespace
+                      type: string
+                    server:
+                      description: Server specifies the URL of the target cluster's
+                        Kubernetes control plane API. This must be set if ClusterName
+                        is not set.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
               ignoreDifferences:
                 description: IgnoreDifferences is a list of resources and their fields
                   which should be ignored during comparison
@@ -4348,6 +4383,11 @@ spec:
                           description: ResourceResult holds the operation result details
                             of a specific resource
                           properties:
+                            destination:
+                              description: |-
+                                Destination is the name of the Application destination this resource was synced to.
+                                Empty means the Application's spec.destination.
+                              type: string
                             group:
                               description: Group specifies the API group of the resource
                               type: string
@@ -5240,6 +5280,20 @@ spec:
                           - repoURL
                           type: object
                         type: array
+                      waveFrontier:
+                        description: |-
+                          WaveFrontier tracks how far a sync spanning multiple destinations has progressed through the
+                          shared sync-wave schedule. It is unset for an application with a single destination.
+                        properties:
+                          phase:
+                            description: Phase is the sync phase, one of PreSync,
+                              Sync or PostSync.
+                            type: string
+                          wave:
+                            description: Wave is the sync wave within that phase.
+                            format: int64
+                            type: integer
+                        type: object
                     required:
                     - revision
                     type: object
@@ -5264,6 +5318,11 @@ spec:
                   description: ResourceStatus holds the current synchronization and
                     health status of a Kubernetes resource.
                   properties:
+                    destination:
+                      description: |-
+                        Destination is the name of the Application destination this resource is deployed to.
+                        Empty means the Application's spec.destination.
+                      type: string
                     group:
                       description: Group represents the API group of the resource
                         (e.g., "apps" for Deployments).
@@ -6336,6 +6395,39 @@ spec:
                               is not set.
                             type: string
                         type: object
+                      destinations:
+                        description: Destinations is a reference to the application's
+                          additional named destinations used for comparison
+                        items:
+                          description: |-
+                            NamedDestination is an additional deployment destination of an Application. Individual manifests
+                            select one by name using the argocd.argoproj.io/destination annotation. Manifests without that
+                            annotation are deployed to the Application's spec.destination.
+                          properties:
+                            clusterName:
+                              description: ClusterName is an alternate way of specifying
+                                the target cluster by its symbolic name. This must
+                                be set if Server is not set.
+                              type: string
+                            name:
+                              description: |-
+                                Name uniquely identifies this destination within the Application. It is the value referenced by
+                                the argocd.argoproj.io/destination annotation on a manifest. It must not contain '/' or '@'.
+                              type: string
+                            namespace:
+                              description: |-
+                                Namespace specifies the target namespace for resources routed to this destination.
+                                The namespace will only be set for namespace-scoped resources that have not set a value for .metadata.namespace
+                              type: string
+                            server:
+                              description: Server specifies the URL of the target
+                                cluster's Kubernetes control plane API. This must
+                                be set if ClusterName is not set.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
                       ignoreDifferences:
                         description: IgnoreDifferences is a reference to the application's
                           ignored differences used for comparison

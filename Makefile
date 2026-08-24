@@ -81,6 +81,16 @@ ARGOCD_E2E_DIR?=/tmp/argo-e2e
 ARGOCD_E2E_TEST_TIMEOUT?=90m
 ARGOCD_E2E_RERUN_FAILS?=5
 
+# ARGOCD_E2E_RUN restricts the e2e suite to tests whose name matches a regular expression, the way
+# `go test -run` does. Empty runs everything, which is the default and what CI should normally do.
+# Set it while iterating on one area so a cycle costs minutes instead of the whole suite.
+ARGOCD_E2E_RUN?=
+ifneq ($(ARGOCD_E2E_RUN),)
+ARGOCD_E2E_RUN_FLAG=-run $(ARGOCD_E2E_RUN)
+else
+ARGOCD_E2E_RUN_FLAG=
+endif
+
 ARGOCD_IN_CI?=false
 ARGOCD_TEST_E2E?=true
 ARGOCD_BIN_MODE?=true
@@ -494,7 +504,7 @@ test-e2e:
 test-e2e-local: cli-local
 	# NO_PROXY ensures all tests don't go out through a proxy if one is configured on the test system
 	export GO111MODULE=off
-	ARGOCD_APPLICATIONSET_CONTROLLER_ENABLE_PROGRESSIVE_SYNCS=$${ARGOCD_APPLICATIONSET_CONTROLLER_ENABLE_PROGRESSIVE_SYNCS:-true}  DIST_DIR=${DIST_DIR} RERUN_FAILS=$(ARGOCD_E2E_RERUN_FAILS) PACKAGES="./test/e2e" ARGOCD_E2E_RECORD=${ARGOCD_E2E_RECORD} ARGOCD_CONFIG_DIR=$(HOME)/.config/argocd-e2e ARGOCD_GPG_ENABLED=true NO_PROXY=* ./hack/test.sh -timeout $(ARGOCD_E2E_TEST_TIMEOUT) -v -args -test.gocoverdir="$(PWD)/test-results"
+	ARGOCD_APPLICATIONSET_CONTROLLER_ENABLE_PROGRESSIVE_SYNCS=$${ARGOCD_APPLICATIONSET_CONTROLLER_ENABLE_PROGRESSIVE_SYNCS:-true}  DIST_DIR=${DIST_DIR} RERUN_FAILS=$(ARGOCD_E2E_RERUN_FAILS) PACKAGES="./test/e2e" ARGOCD_E2E_RECORD=${ARGOCD_E2E_RECORD} ARGOCD_CONFIG_DIR=$(HOME)/.config/argocd-e2e ARGOCD_GPG_ENABLED=true NO_PROXY=* ./hack/test.sh -timeout $(ARGOCD_E2E_TEST_TIMEOUT) -v $(ARGOCD_E2E_RUN_FLAG) -args -test.gocoverdir="$(PWD)/test-results"
 
 # Spawns a shell in the test server container for debugging purposes
 debug-test-server: test-tools-image
@@ -510,6 +520,23 @@ start-e2e: test-tools-image
 	$(DOCKER) version
 	mkdir -p ${GOCACHE}
 	$(call run-in-test-server,make ARGOCD_PROCFILE=test/container/Procfile start-e2e-local)
+
+# Creates a second cluster for the multi-destination e2e tests, which need two genuinely separate
+# clusters: Argo CD reads live objects once per cluster and attributes them to an Application by an
+# annotation naming the Application rather than the destination, so two destinations backed by one
+# API server would each see the other's resources as extras.
+#
+# The second cluster is optional. Without it the multi-destination e2e tests skip and everything
+# else runs as before.
+.PHONY: start-e2e-second-cluster
+start-e2e-second-cluster:
+	k3d cluster create argocd-e2e-second --no-lb --k3s-arg "--disable=traefik@server:0" --wait
+	k3d kubeconfig get argocd-e2e-second > $(HOME)/.kube/second-cluster.config
+	@echo "Now run the e2e tests with ARGOCD_E2E_SECOND_CLUSTER_KUBECONFIG=$(HOME)/.kube/second-cluster.config"
+
+.PHONY: stop-e2e-second-cluster
+stop-e2e-second-cluster:
+	k3d cluster delete argocd-e2e-second
 
 # Starts e2e server locally (or within a container)
 .PHONY: start-e2e-local

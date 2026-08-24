@@ -153,6 +153,7 @@ export interface ResourceResult {
     hookType: HookType;
     hookPhase: OperationPhase;
     images?: string[];
+    destination?: string;
 }
 
 export type SyncResourceResult = ResourceResult & {
@@ -212,6 +213,22 @@ export interface ApplicationDestination {
      * Name of the destination cluster which can be used instead of server (url) field
      */
     name: string;
+}
+
+/**
+ * NamedDestination is an additional cluster an Application may deploy to. A manifest selects one by
+ * name with the argocd.argoproj.io/destination annotation; manifests without that annotation go to
+ * spec.destination.
+ *
+ * The cluster is given by server or by clusterName -- unlike ApplicationDestination, whose `name`
+ * field means the cluster's symbolic name, `name` here identifies the destination within the
+ * Application.
+ */
+export interface NamedDestination {
+    name: string;
+    server?: string;
+    namespace?: string;
+    clusterName?: string;
 }
 
 export interface ApplicationDestinationServiceAccount {
@@ -355,6 +372,7 @@ export interface ApplicationSpec {
     sources: ApplicationSource[];
     sourceHydrator?: SourceHydrator;
     destination: ApplicationDestination;
+    destinations?: NamedDestination[];
     syncPolicy?: SyncPolicy;
     ignoreDifferences?: ResourceIgnoreDifferences[];
     info?: Info[];
@@ -443,6 +461,11 @@ export interface ResourceStatus {
     requiresDeletionConfirmation?: boolean;
     syncWave?: number;
     orphaned?: boolean;
+    /**
+     * Name of the destination this resource belongs to. Empty means spec.destination, so the same
+     * kind/namespace/name can legitimately appear more than once, once per destination.
+     */
+    destination?: string;
 }
 
 export interface Resource extends ResourceStatus {
@@ -460,6 +483,12 @@ export interface ResourceRef {
     name: string;
     version: string;
     group: string;
+    /**
+     * Name of the destination this resource lives in; empty means spec.destination. ResourceNode
+     * extends this interface, so nodes and their parentRefs are both attributed, which keeps parent
+     * links resolvable within their own cluster.
+     */
+    destination?: string;
 }
 
 export interface ResourceNetworkingInfo {
@@ -516,6 +545,7 @@ export interface ResourceDiff extends ResourceID {
     predictedLiveState: State;
     normalizedLiveState: State;
     hook: boolean;
+    destination?: string;
 }
 
 export interface SyncStatus {
@@ -1094,6 +1124,10 @@ export interface Node {
     systemInfo: NodeSystemInfo;
     resourcesInfo: HostResourceInfo[];
     labels: {[name: string]: string};
+    // The Application destination whose cluster this node belongs to, empty for spec.destination.
+    // Node names are unique only within a cluster, so two clusters can contribute nodes with the
+    // same name once the lists are merged.
+    destination?: string;
 }
 
 export interface NodeSystemInfo {

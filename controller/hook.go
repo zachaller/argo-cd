@@ -15,7 +15,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/client-go/rest"
 
 	"github.com/argoproj/argo-cd/v3/util/lua"
 
@@ -95,8 +94,31 @@ func hasGitOpsEngineSyncPhaseHook(obj *unstructured.Unstructured) bool {
 	return false
 }
 
-// executeHooks is a generic function to execute hooks of a specified type
-func (ctrl *ApplicationController) executeHooks(ctx context.Context, hookType HookType, app *appv1.Application, proj *appv1.AppProject, liveObjs map[kube.ResourceKey]*unstructured.Unstructured, config *rest.Config, logCtx *log.Entry) (completed bool, retErr error) {
+// hookName names a hook for a log or error message, prefixing the destination it lives in when that
+// is not the primary one -- the same shape as ResourceNode.FullName.
+func hookName(destination, namespace, name string) string {
+	if destination == argoutil.PrimaryDestinationName {
+		return fmt.Sprintf("%s/%s", namespace, name)
+	}
+	return fmt.Sprintf("%s/%s/%s", destination, namespace, name)
+}
+
+// hookLogger returns a logger that names the destination a hook stage is acting in, so a message
+// about a hook is not ambiguous once an application deploys to more than one cluster.
+func hookLogger(logCtx *log.Entry, destination string) *log.Entry {
+	if destination == argoutil.PrimaryDestinationName {
+		return logCtx
+	}
+	return logCtx.WithField("destination", destination)
+}
+
+// executeHooks is a generic function to execute hooks of a specified type.
+//
+// Hooks are routed to the destination their annotation names, exactly as reconcile routes every
+// other manifest, and are created, health-checked and retried in that destination's cluster. The
+// stage completes only when every destination's hooks have completed: an application is deleted as
+// one unit, so a hook still running in one cluster holds the whole deletion.
+func (ctrl *ApplicationController) executeHooks(ctx context.Context, hookType HookType, app *appv1.Application, proj *appv1.AppProject, dests []deletionDestination, liveObjs map[string]map[kube.ResourceKey]*unstructured.Unstructured, logCtx *log.Entry) (completed bool, retErr error) {
 	ctx, span := tracer.Start(ctx, "controller.executeHooks")
 	setAppTraceAttrs(span, app, attribute.String("argocd.hook.type", string(hookType)))
 	defer func() { traceutil.EndSpan(span, retErr) }()
@@ -126,51 +148,77 @@ func (ctrl *ApplicationController) executeHooks(ctx context.Context, hookType Ho
 		return false, err
 	}
 
-	// Find existing hooks of the specified type
-	runningHooks := map[kube.ResourceKey]*unstructured.Unstructured{}
-	for key, obj := range liveObjs {
-		if isHookOfType(obj, hookType) {
-			runningHooks[key] = obj
-		}
+	// Route each hook to the destination its annotation names. A hook naming a destination that did
+	// not resolve is skipped rather than created in the primary destination: running a delete hook
+	// against the wrong cluster is worse than not running it at all.
+	targetHooks := make(map[string][]*unstructured.Unstructured, len(dests))
+	for _, dest := range dests {
+		targetHooks[dest.name] = nil
 	}
-
-	// Find expected hooks that need to be created
-	expectedHook := map[kube.ResourceKey]*unstructured.Unstructured{}
 	for _, obj := range targets {
-		if obj.GetNamespace() == "" {
-			obj.SetNamespace(app.Spec.Destination.Namespace)
-		}
 		if !isHookOfType(obj, hookType) {
 			continue
 		}
-		if _, alreadyExists := runningHooks[kube.GetResourceKey(obj)]; !alreadyExists {
-			expectedHook[kube.GetResourceKey(obj)] = obj
+		destName := argoutil.DestinationNameForObject(obj)
+		if _, declared := targetHooks[destName]; !declared {
+			logCtx.Warnf("Skipping %s hook %s/%s: destination %q is unavailable", hookType, obj.GetKind(), obj.GetName(), destName)
+			continue
 		}
+		targetHooks[destName] = append(targetHooks[destName], obj)
+	}
+
+	// Find existing hooks of the specified type, in each destination's own cluster
+	runningHooks := make(map[string]map[kube.ResourceKey]*unstructured.Unstructured, len(dests))
+	for _, dest := range dests {
+		running := map[kube.ResourceKey]*unstructured.Unstructured{}
+		for key, obj := range liveObjs[dest.name] {
+			if isHookOfType(obj, hookType) {
+				running[key] = obj
+			}
+		}
+		runningHooks[dest.name] = running
 	}
 
 	// Create hooks that don't exist yet
 	createdCnt := 0
-	for key, obj := range expectedHook {
-		// Apply app instance tracking metadata so the hook can be tracked and cleaned up.
-		// Use the same code path as regular sync resources so the configured
-		// tracking method (label, annotation, annotation+label) is honored.
-		// When the configured tracking method writes a label, this also ensures
-		// the label value is truncated to fit Kubernetes' 63-character label
-		// limit (see https://github.com/argoproj/argo-cd/issues/27527).
-		if err := resourceTracking.SetAppInstance(obj, appLabelKey, app.InstanceName(ctrl.namespace), app.Spec.Destination.Namespace, trackingMethod, installationID); err != nil {
-			return false, fmt.Errorf("failed to set app instance tracking on %s hook %s: %w", hookType, key, err)
+	for _, dest := range dests {
+		destLog := hookLogger(logCtx, dest.name)
+
+		// Find expected hooks that need to be created
+		expectedHook := map[kube.ResourceKey]*unstructured.Unstructured{}
+		for _, obj := range targetHooks[dest.name] {
+			if obj.GetNamespace() == "" {
+				obj.SetNamespace(dest.namespace)
+			}
+			if _, alreadyExists := runningHooks[dest.name][kube.GetResourceKey(obj)]; !alreadyExists {
+				expectedHook[kube.GetResourceKey(obj)] = obj
+			}
 		}
 
-		logCtx.Infof("Creating %s hook resource: %s", hookType, key)
-		_, err = ctrl.kubectl.CreateResource(ctx, config, obj.GroupVersionKind(), obj.GetName(), obj.GetNamespace(), obj, metav1.CreateOptions{})
-		if err != nil {
-			if apierrors.IsAlreadyExists(err) {
-				logCtx.Warnf("Hook resource %s already exists, skipping", key)
-				continue
+		for key, obj := range expectedHook {
+			// Apply app instance tracking metadata so the hook can be tracked and cleaned up.
+			// Use the same code path as regular sync resources so the configured
+			// tracking method (label, annotation, annotation+label) is honored.
+			// When the configured tracking method writes a label, this also ensures
+			// the label value is truncated to fit Kubernetes' 63-character label
+			// limit (see https://github.com/argoproj/argo-cd/issues/27527).
+			// The tracking annotation records the destination's own namespace, matching what sync
+			// wrote when the hook's siblings were applied there.
+			if err := resourceTracking.SetAppInstance(obj, appLabelKey, app.InstanceName(ctrl.namespace), dest.namespace, trackingMethod, installationID); err != nil {
+				return false, fmt.Errorf("failed to set app instance tracking on %s hook %s: %w", hookType, key, err)
 			}
-			return false, err
+
+			destLog.Infof("Creating %s hook resource: %s", hookType, key)
+			_, err = ctrl.kubectl.CreateResource(ctx, dest.config, obj.GroupVersionKind(), obj.GetName(), obj.GetNamespace(), obj, metav1.CreateOptions{})
+			if err != nil {
+				if apierrors.IsAlreadyExists(err) {
+					destLog.Warnf("Hook resource %s already exists, skipping", key)
+					continue
+				}
+				return false, err
+			}
+			createdCnt++
 		}
-		createdCnt++
 	}
 
 	if createdCnt > 0 {
@@ -187,48 +235,57 @@ func (ctrl *ApplicationController) executeHooks(ctx context.Context, hookType Ho
 
 	progressingHooksCount := 0
 	var failedHooks []string
-	var failedHookObjects []*unstructured.Unstructured
 
-	for key, obj := range runningHooks {
-		hookHealth, err := health.GetResourceHealth(obj, healthOverrides)
-		if err != nil {
-			return false, err
-		}
-		if hookHealth == nil {
-			logCtx.WithFields(log.Fields{
-				"group":     obj.GroupVersionKind().Group,
-				"version":   obj.GroupVersionKind().Version,
-				"kind":      obj.GetKind(),
-				"name":      obj.GetName(),
-				"namespace": obj.GetNamespace(),
-			}).Info("No health check defined for resource, considering it healthy")
-			hookHealth = &health.HealthStatus{
-				Status: health.HealthStatusHealthy,
+	for _, dest := range dests {
+		destLog := hookLogger(logCtx, dest.name)
+		var failedHookObjects []*unstructured.Unstructured
+
+		for key, obj := range runningHooks[dest.name] {
+			hookHealth, err := health.GetResourceHealth(obj, healthOverrides)
+			if err != nil {
+				return false, err
+			}
+			if hookHealth == nil {
+				destLog.WithFields(log.Fields{
+					"group":     obj.GroupVersionKind().Group,
+					"version":   obj.GroupVersionKind().Version,
+					"kind":      obj.GetKind(),
+					"name":      obj.GetName(),
+					"namespace": obj.GetNamespace(),
+				}).Info("No health check defined for resource, considering it healthy")
+				hookHealth = &health.HealthStatus{
+					Status: health.HealthStatusHealthy,
+				}
+			}
+
+			switch hookHealth.Status {
+			case health.HealthStatusProgressing:
+				destLog.Debugf("Hook %s is progressing", key)
+				progressingHooksCount++
+			case health.HealthStatusDegraded:
+				destLog.Warnf("Hook %s is degraded: %s", key, hookHealth.Message)
+				failedHooks = append(failedHooks, hookName(dest.name, obj.GetNamespace(), obj.GetName()))
+				failedHookObjects = append(failedHookObjects, obj)
+			case health.HealthStatusHealthy:
+				destLog.Debugf("Hook %s is healthy", key)
 			}
 		}
 
-		switch hookHealth.Status {
-		case health.HealthStatusProgressing:
-			logCtx.Debugf("Hook %s is progressing", key)
-			progressingHooksCount++
-		case health.HealthStatusDegraded:
-			logCtx.Warnf("Hook %s is degraded: %s", key, hookHealth.Message)
-			failedHooks = append(failedHooks, fmt.Sprintf("%s/%s", obj.GetNamespace(), obj.GetName()))
-			failedHookObjects = append(failedHookObjects, obj)
-		case health.HealthStatusHealthy:
-			logCtx.Debugf("Hook %s is healthy", key)
+		// Delete failed hooks to allow retry with potentially fixed hook definitions. Every
+		// destination is cleaned up before the error is returned, so a retry does not find one
+		// cluster's failed hooks still in place.
+		if len(failedHookObjects) > 0 {
+			destLog.Infof("Deleting %d failed %s hook(s) to allow retry", len(failedHookObjects), hookType)
+			for _, obj := range failedHookObjects {
+				err = ctrl.kubectl.DeleteResource(ctx, dest.config, obj.GroupVersionKind(), obj.GetName(), obj.GetNamespace(), metav1.DeleteOptions{})
+				if err != nil && !apierrors.IsNotFound(err) {
+					destLog.WithError(err).Warnf("Failed to delete failed hook %s/%s", obj.GetNamespace(), obj.GetName())
+				}
+			}
 		}
 	}
 
 	if len(failedHooks) > 0 {
-		// Delete failed hooks to allow retry with potentially fixed hook definitions
-		logCtx.Infof("Deleting %d failed %s hook(s) to allow retry", len(failedHookObjects), hookType)
-		for _, obj := range failedHookObjects {
-			err = ctrl.kubectl.DeleteResource(ctx, config, obj.GroupVersionKind(), obj.GetName(), obj.GetNamespace(), metav1.DeleteOptions{})
-			if err != nil && !apierrors.IsNotFound(err) {
-				logCtx.WithError(err).Warnf("Failed to delete failed hook %s/%s", obj.GetNamespace(), obj.GetName())
-			}
-		}
 		return false, fmt.Errorf("%s hook(s) failed: %s", hookType, strings.Join(failedHooks, ", "))
 	}
 
@@ -240,8 +297,13 @@ func (ctrl *ApplicationController) executeHooks(ctx context.Context, hookType Ho
 	return true, nil
 }
 
-// cleanupHooks is a generic function to clean up hooks of a specified type
-func (ctrl *ApplicationController) cleanupHooks(ctx context.Context, hookType HookType, liveObjs map[kube.ResourceKey]*unstructured.Unstructured, config *rest.Config, logCtx *log.Entry) (completed bool, retErr error) {
+// cleanupHooks is a generic function to clean up hooks of a specified type, in every destination the
+// application deploys to.
+//
+// Each destination's hooks are judged by their own outcome: a hook that failed in one cluster does
+// not change what a delete policy does to a hook in another, because the policies describe what
+// happened to that hook, not to the application as a whole.
+func (ctrl *ApplicationController) cleanupHooks(ctx context.Context, hookType HookType, dests []deletionDestination, liveObjs map[string]map[kube.ResourceKey]*unstructured.Unstructured, logCtx *log.Entry) (completed bool, retErr error) {
 	ctx, span := tracer.Start(ctx, "controller.cleanupHooks")
 	span.SetAttributes(attribute.String("argocd.hook.type", string(hookType)))
 	defer func() { traceutil.EndSpan(span, retErr) }()
@@ -252,61 +314,65 @@ func (ctrl *ApplicationController) cleanupHooks(ctx context.Context, hookType Ho
 	healthOverrides := lua.ResourceHealthOverrides(resourceOverrides)
 
 	pendingDeletionCount := 0
-	aggregatedHealth := health.HealthStatusHealthy
-	var hooks []*unstructured.Unstructured
 
-	// Collect hooks and determine overall health
-	for _, obj := range liveObjs {
-		if !isHookOfType(obj, hookType) {
-			continue
-		}
-		hookHealth, err := health.GetResourceHealth(obj, healthOverrides)
-		if err != nil {
-			return false, err
-		}
-		if hookHealth == nil {
-			hookHealth = &health.HealthStatus{
-				Status: health.HealthStatusHealthy,
-			}
-		}
-		if health.IsWorse(aggregatedHealth, hookHealth.Status) {
-			aggregatedHealth = hookHealth.Status
-		}
-		hooks = append(hooks, obj)
-	}
+	for _, dest := range dests {
+		destLog := hookLogger(logCtx, dest.name)
+		aggregatedHealth := health.HealthStatusHealthy
+		var hooks []*unstructured.Unstructured
 
-	if len(hooks) == 0 {
-		return true, nil
-	}
-
-	// Process hooks for deletion
-	for _, obj := range hooks {
-		deletePolicies := hook.DeletePolicies(obj)
-		shouldDelete := false
-
-		if len(deletePolicies) == 0 {
-			// If no delete policy is specified, always delete hooks during cleanup phase
-			shouldDelete = true
-		} else {
-			// Check if any delete policy matches the current hook state
-			for _, policy := range deletePolicies {
-				if (policy == common.HookDeletePolicyHookFailed && aggregatedHealth == health.HealthStatusDegraded) ||
-					(policy == common.HookDeletePolicyHookSucceeded && aggregatedHealth == health.HealthStatusHealthy) {
-					shouldDelete = true
-					break
-				}
-			}
-		}
-
-		if shouldDelete {
-			pendingDeletionCount++
-			if obj.GetDeletionTimestamp() != nil {
+		// Collect hooks and determine overall health
+		for _, obj := range liveObjs[dest.name] {
+			if !isHookOfType(obj, hookType) {
 				continue
 			}
-			logCtx.Infof("Deleting %s hook %s/%s", hookType, obj.GetNamespace(), obj.GetName())
-			err = ctrl.kubectl.DeleteResource(ctx, config, obj.GroupVersionKind(), obj.GetName(), obj.GetNamespace(), metav1.DeleteOptions{})
-			if err != nil && !apierrors.IsNotFound(err) {
+			hookHealth, err := health.GetResourceHealth(obj, healthOverrides)
+			if err != nil {
 				return false, err
+			}
+			if hookHealth == nil {
+				hookHealth = &health.HealthStatus{
+					Status: health.HealthStatusHealthy,
+				}
+			}
+			if health.IsWorse(aggregatedHealth, hookHealth.Status) {
+				aggregatedHealth = hookHealth.Status
+			}
+			hooks = append(hooks, obj)
+		}
+
+		if len(hooks) == 0 {
+			continue
+		}
+
+		// Process hooks for deletion
+		for _, obj := range hooks {
+			deletePolicies := hook.DeletePolicies(obj)
+			shouldDelete := false
+
+			if len(deletePolicies) == 0 {
+				// If no delete policy is specified, always delete hooks during cleanup phase
+				shouldDelete = true
+			} else {
+				// Check if any delete policy matches the current hook state
+				for _, policy := range deletePolicies {
+					if (policy == common.HookDeletePolicyHookFailed && aggregatedHealth == health.HealthStatusDegraded) ||
+						(policy == common.HookDeletePolicyHookSucceeded && aggregatedHealth == health.HealthStatusHealthy) {
+						shouldDelete = true
+						break
+					}
+				}
+			}
+
+			if shouldDelete {
+				pendingDeletionCount++
+				if obj.GetDeletionTimestamp() != nil {
+					continue
+				}
+				destLog.Infof("Deleting %s hook %s/%s", hookType, obj.GetNamespace(), obj.GetName())
+				err = ctrl.kubectl.DeleteResource(ctx, dest.config, obj.GroupVersionKind(), obj.GetName(), obj.GetNamespace(), metav1.DeleteOptions{})
+				if err != nil && !apierrors.IsNotFound(err) {
+					return false, err
+				}
 			}
 		}
 	}
@@ -321,18 +387,18 @@ func (ctrl *ApplicationController) cleanupHooks(ctx context.Context, hookType Ho
 
 // Execute and cleanup hooks for pre-delete and post-delete operations
 
-func (ctrl *ApplicationController) executePreDeleteHooks(ctx context.Context, app *appv1.Application, proj *appv1.AppProject, liveObjs map[kube.ResourceKey]*unstructured.Unstructured, config *rest.Config, logCtx *log.Entry) (bool, error) {
-	return ctrl.executeHooks(ctx, PreDeleteHookType, app, proj, liveObjs, config, logCtx)
+func (ctrl *ApplicationController) executePreDeleteHooks(ctx context.Context, app *appv1.Application, proj *appv1.AppProject, dests []deletionDestination, liveObjs map[string]map[kube.ResourceKey]*unstructured.Unstructured, logCtx *log.Entry) (bool, error) {
+	return ctrl.executeHooks(ctx, PreDeleteHookType, app, proj, dests, liveObjs, logCtx)
 }
 
-func (ctrl *ApplicationController) cleanupPreDeleteHooks(ctx context.Context, liveObjs map[kube.ResourceKey]*unstructured.Unstructured, config *rest.Config, logCtx *log.Entry) (bool, error) {
-	return ctrl.cleanupHooks(ctx, PreDeleteHookType, liveObjs, config, logCtx)
+func (ctrl *ApplicationController) cleanupPreDeleteHooks(ctx context.Context, dests []deletionDestination, liveObjs map[string]map[kube.ResourceKey]*unstructured.Unstructured, logCtx *log.Entry) (bool, error) {
+	return ctrl.cleanupHooks(ctx, PreDeleteHookType, dests, liveObjs, logCtx)
 }
 
-func (ctrl *ApplicationController) executePostDeleteHooks(ctx context.Context, app *appv1.Application, proj *appv1.AppProject, liveObjs map[kube.ResourceKey]*unstructured.Unstructured, config *rest.Config, logCtx *log.Entry) (bool, error) {
-	return ctrl.executeHooks(ctx, PostDeleteHookType, app, proj, liveObjs, config, logCtx)
+func (ctrl *ApplicationController) executePostDeleteHooks(ctx context.Context, app *appv1.Application, proj *appv1.AppProject, dests []deletionDestination, liveObjs map[string]map[kube.ResourceKey]*unstructured.Unstructured, logCtx *log.Entry) (bool, error) {
+	return ctrl.executeHooks(ctx, PostDeleteHookType, app, proj, dests, liveObjs, logCtx)
 }
 
-func (ctrl *ApplicationController) cleanupPostDeleteHooks(ctx context.Context, liveObjs map[kube.ResourceKey]*unstructured.Unstructured, config *rest.Config, logCtx *log.Entry) (bool, error) {
-	return ctrl.cleanupHooks(ctx, PostDeleteHookType, liveObjs, config, logCtx)
+func (ctrl *ApplicationController) cleanupPostDeleteHooks(ctx context.Context, dests []deletionDestination, liveObjs map[string]map[kube.ResourceKey]*unstructured.Unstructured, logCtx *log.Entry) (bool, error) {
+	return ctrl.cleanupHooks(ctx, PostDeleteHookType, dests, liveObjs, logCtx)
 }

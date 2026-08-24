@@ -107,6 +107,12 @@ $pod-age-icon-clr: #ffce25;
             font-size: 10px;
             text-align: center;
         }
+        // The destination a group belongs to, shown under its name. Only rendered for a group
+        // outside the primary destination, where the name alone may not be unique.
+        &__destination {
+            font-size: 11px;
+            color: $argo-color-gray-6;
+        }
         &__pod-container {
             flex-direction: column;
             width: $pod-container-width;

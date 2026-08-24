@@ -5190,7 +5190,7 @@ func TestGetApplicationClusterConfig(t *testing.T) {
 			},
 		}
 
-		config, err := appServer.getApplicationClusterConfig(t.Context(), app, project)
+		config, err := appServer.getApplicationClusterConfig(t.Context(), app, project, argo.PrimaryDestinationName)
 		require.NoError(t, err)
 		assert.Empty(t, config.Impersonate.UserName)
 	})
@@ -5225,7 +5225,7 @@ func TestGetApplicationClusterConfig(t *testing.T) {
 			app, projWithSA,
 		)
 
-		config, err := appServer.getApplicationClusterConfig(t.Context(), app, projWithSA)
+		config, err := appServer.getApplicationClusterConfig(t.Context(), app, projWithSA, argo.PrimaryDestinationName)
 		require.NoError(t, err)
 		assert.Equal(t, "system:serviceaccount:"+test.FakeDestNamespace+":test-sa", config.Impersonate.UserName)
 	})
@@ -5251,7 +5251,7 @@ func TestGetApplicationClusterConfig(t *testing.T) {
 			},
 		}
 
-		config, err := appServer.getApplicationClusterConfig(t.Context(), app, project)
+		config, err := appServer.getApplicationClusterConfig(t.Context(), app, project, argo.PrimaryDestinationName)
 		assert.Nil(t, config)
 		assert.ErrorContains(t, err, "no matching service account found")
 	})
@@ -5280,7 +5280,7 @@ func TestGetApplicationClusterConfig(t *testing.T) {
 			},
 		}
 
-		config, err := appServer.getApplicationClusterConfig(t.Context(), app, project)
+		config, err := appServer.getApplicationClusterConfig(t.Context(), app, project, argo.PrimaryDestinationName)
 		require.NoError(t, err)
 		assert.NotNil(t, config)
 		// Should not have impersonation set (uses controller SA)
@@ -5320,7 +5320,7 @@ func TestGetApplicationClusterConfig(t *testing.T) {
 			app, projWithSA,
 		)
 
-		config, err := appServer.getApplicationClusterConfig(t.Context(), app, projWithSA)
+		config, err := appServer.getApplicationClusterConfig(t.Context(), app, projWithSA, argo.PrimaryDestinationName)
 		require.NoError(t, err)
 		// Should use impersonation since SA is configured
 		assert.Equal(t, "system:serviceaccount:"+test.FakeDestNamespace+":test-sa", config.Impersonate.UserName)
@@ -5614,5 +5614,269 @@ func TestRollbackRBACPermissions_ProjectScoped(t *testing.T) {
 		})
 		require.Error(t, err)
 		assert.ErrorContains(t, err, "permission denied")
+	})
+}
+
+func TestEnforceDestinations(t *testing.T) {
+	dests := []v1alpha1.NamedDestination{
+		{Name: "prod", Server: "https://prod.example.com"},
+		{Name: "shared", Server: "https://shared.example.com"},
+	}
+
+	// Permits everything on the application itself, and the prod destination only.
+	policy := func(enf *rbac.Enforcer) {
+		_ = enf.SetBuiltinPolicy(`
+p, test-user, applications, *, */*, allow
+p, test-user, destinations, *, default/prod, allow
+`)
+	}
+
+	claims := func(t *testing.T) context.Context {
+		t.Helper()
+		//nolint:staticcheck
+		return context.WithValue(t.Context(), "claims", &jwt.RegisteredClaims{Subject: "test-user"})
+	}
+
+	t.Run("no named destinations is always permitted", func(t *testing.T) {
+		// Not even the settings are read: an application that does not use the feature must behave
+		// exactly as it did before the feature existed.
+		appServer := newTestAppServerWithEnforcerConfigure(t, policy, map[string]string{
+			"application.destinations.rbac.enabled": "true",
+		})
+		require.NoError(t, appServer.enforceDestinations(claims(t), "default", nil, rbac.ActionSync))
+	})
+
+	t.Run("disabled leaves destinations unchecked", func(t *testing.T) {
+		appServer := newTestAppServerWithEnforcerConfigure(t, policy, map[string]string{})
+		// "shared" has no policy, so this would be denied if the check ran at all.
+		require.NoError(t, appServer.enforceDestinations(claims(t), "default", dests, rbac.ActionSync))
+	})
+
+	t.Run("enabled denies a destination with no policy", func(t *testing.T) {
+		appServer := newTestAppServerWithEnforcerConfigure(t, policy, map[string]string{
+			"application.destinations.rbac.enabled": "true",
+		})
+		err := appServer.enforceDestinations(claims(t), "default", dests, rbac.ActionSync)
+		require.Error(t, err, "shared has no destinations policy")
+		assert.Equal(t, codes.PermissionDenied.String(), status.Code(err).String())
+	})
+
+	t.Run("enabled permits a destination with a policy", func(t *testing.T) {
+		appServer := newTestAppServerWithEnforcerConfigure(t, policy, map[string]string{
+			"application.destinations.rbac.enabled": "true",
+		})
+		require.NoError(t, appServer.enforceDestinations(claims(t), "default",
+			[]v1alpha1.NamedDestination{{Name: "prod"}}, rbac.ActionSync))
+	})
+
+	t.Run("the object is scoped to the project", func(t *testing.T) {
+		appServer := newTestAppServerWithEnforcerConfigure(t, policy, map[string]string{
+			"application.destinations.rbac.enabled": "true",
+		})
+		// Same destination name, different project: the grant on default/prod must not carry over.
+		err := appServer.enforceDestinations(claims(t), "other-proj",
+			[]v1alpha1.NamedDestination{{Name: "prod"}}, rbac.ActionSync)
+		require.Error(t, err)
+		assert.Equal(t, codes.PermissionDenied.String(), status.Code(err).String())
+	})
+
+	t.Run("not enforced reports but allows", func(t *testing.T) {
+		appServer := newTestAppServerWithEnforcerConfigure(t, policy, map[string]string{
+			"application.destinations.rbac.enabled":  "true",
+			"application.destinations.rbac.enforced": "false",
+		})
+		require.NoError(t, appServer.enforceDestinations(claims(t), "default", dests, rbac.ActionSync))
+	})
+}
+
+func TestSyncEnforcesDestinations(t *testing.T) {
+	//nolint:staticcheck
+	ctx := context.WithValue(t.Context(), "claims", &jwt.RegisteredClaims{Subject: "test-user"})
+
+	newServer := func(t *testing.T, config map[string]string) *Server {
+		t.Helper()
+		app := newTestApp(func(app *v1alpha1.Application) {
+			app.Spec.Destinations = []v1alpha1.NamedDestination{
+				{Name: "shared", Server: "https://shared.example.com", Namespace: "shared"},
+			}
+		})
+		f := func(enf *rbac.Enforcer) {
+			_ = enf.SetBuiltinPolicy(`
+p, test-user, applications, *, */*, allow
+`)
+		}
+		return newTestAppServerWithEnforcerConfigure(t, f, config, app)
+	}
+
+	t.Run("denied without a destinations policy", func(t *testing.T) {
+		appServer := newServer(t, map[string]string{"application.destinations.rbac.enabled": "true"})
+		_, err := appServer.Sync(ctx, &application.ApplicationSyncRequest{Name: new("test-app")})
+		require.Error(t, err, "the application grant alone must not be enough")
+		assert.Equal(t, codes.PermissionDenied.String(), status.Code(err).String())
+	})
+
+	t.Run("permitted when the flag is off", func(t *testing.T) {
+		appServer := newServer(t, map[string]string{})
+		_, err := appServer.Sync(ctx, &application.ApplicationSyncRequest{Name: new("test-app")})
+		require.NoError(t, err, "with the feature off the application grant is the whole check")
+	})
+}
+
+func TestResourceActionEnforcesDestinationsByBareVerb(t *testing.T) {
+	//nolint:staticcheck
+	ctx := context.WithValue(t.Context(), "claims", &jwt.RegisteredClaims{Subject: "test-user"})
+
+	group, kind, version := "apps", "Deployment", "v1"
+	resourceName, namespace, actionName := "nginx-deploy", testNamespace, "pause"
+
+	deployment := appsv1.Deployment{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
+		ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: testNamespace},
+	}
+
+	newServer := func(t *testing.T, destinationsPolicy string) *Server {
+		t.Helper()
+		testApp := newTestApp(func(app *v1alpha1.Application) {
+			// Same cluster as the primary, different namespace: distinct enough to be a separate
+			// destination, and resolvable by the fixture.
+			app.Spec.Destinations = []v1alpha1.NamedDestination{
+				{Name: "shared", Server: "https://cluster-api.example.com", Namespace: "shared"},
+			}
+		})
+		testApp.Status.ResourceHealthSource = v1alpha1.ResourceHealthLocationAppTree
+		testApp.Status.Resources = []v1alpha1.ResourceStatus{{
+			Group: group, Kind: kind, Name: resourceName, Namespace: testNamespace, Version: version,
+		}}
+
+		f := func(enf *rbac.Enforcer) {
+			_ = enf.SetBuiltinPolicy("p, test-user, applications, *, */*, allow\n" + destinationsPolicy)
+		}
+		appServer := newTestAppServerWithEnforcerConfigure(t, f,
+			map[string]string{"application.destinations.rbac.enabled": "true"},
+			testApp, kube.MustToUnstructured(&deployment))
+
+		appStateCache := appstate.NewCache(cache.NewCache(cache.NewInMemoryCache(1*time.Hour)), time.Minute)
+		appServer.cache = servercache.NewCache(appStateCache, time.Minute, time.Minute)
+		require.NoError(t, appStateCache.SetAppResourcesTree(testApp.Name, &v1alpha1.ApplicationTree{
+			Nodes: []v1alpha1.ResourceNode{{ResourceRef: v1alpha1.ResourceRef{
+				Group: group, Kind: kind, Version: version, Name: resourceName, Namespace: testNamespace,
+				UID: "2", Destination: "shared",
+			}}},
+		}))
+		return appServer
+	}
+
+	run := func(appServer *Server) error {
+		_, err := appServer.RunResourceActionV2(ctx, &application.ResourceActionRunRequestV2{
+			Name:         new("test-app"),
+			AppNamespace: new("default"),
+			Namespace:    &namespace,
+			Action:       &actionName,
+			ResourceName: &resourceName,
+			Version:      &version,
+			Group:        &group,
+			Kind:         &kind,
+		})
+		return err
+	}
+
+	// A resource action reaches the RBAC layer as "action/<group>/<kind>/<name>". That detail names
+	// a resource, not a destination, so a destinations policy is written against the bare verb.
+	t.Run("the bare verb permits the action", func(t *testing.T) {
+		require.NoError(t, run(newServer(t, "p, test-user, destinations, action, default/shared, allow")))
+	})
+
+	t.Run("a different verb does not permit it", func(t *testing.T) {
+		err := run(newServer(t, "p, test-user, destinations, get, default/shared, allow"))
+		require.Error(t, err)
+		assert.Equal(t, codes.PermissionDenied.String(), status.Code(err).String())
+	})
+}
+
+func TestResourceLevelDestinationScoping(t *testing.T) {
+	//nolint:staticcheck
+	ctx := context.WithValue(t.Context(), "claims", &jwt.RegisteredClaims{Subject: "test-user"})
+
+	group, kind, version := "apps", "Deployment", "v1"
+	resourceName, actionName := "nginx-deploy", "pause"
+
+	deployment := appsv1.Deployment{
+		TypeMeta:   metav1.TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
+		ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: testNamespace},
+	}
+
+	ref := func(destination string) v1alpha1.ResourceRef {
+		return v1alpha1.ResourceRef{
+			Group: group, Kind: kind, Version: version, Name: resourceName,
+			Namespace: testNamespace, UID: "uid-" + destination, Destination: destination,
+		}
+	}
+
+	newServer := func(t *testing.T, destinationsPolicy string, nodes ...v1alpha1.ResourceNode) *Server {
+		t.Helper()
+		testApp := newTestApp(func(app *v1alpha1.Application) {
+			app.Spec.Destinations = []v1alpha1.NamedDestination{
+				// "shared" resolves to the same cluster as the primary; "other" is never resolved
+				// because no resource in these trees lives there.
+				{Name: "shared", Server: "https://cluster-api.example.com", Namespace: "shared"},
+				{Name: "other", Server: "https://other.example.com", Namespace: "other"},
+			}
+		})
+		testApp.Status.ResourceHealthSource = v1alpha1.ResourceHealthLocationAppTree
+
+		f := func(enf *rbac.Enforcer) {
+			_ = enf.SetBuiltinPolicy("p, test-user, applications, *, */*, allow\n" + destinationsPolicy)
+		}
+		appServer := newTestAppServerWithEnforcerConfigure(t, f,
+			map[string]string{"application.destinations.rbac.enabled": "true"},
+			testApp, kube.MustToUnstructured(&deployment))
+
+		appStateCache := appstate.NewCache(cache.NewCache(cache.NewInMemoryCache(1*time.Hour)), time.Minute)
+		appServer.cache = servercache.NewCache(appStateCache, time.Minute, time.Minute)
+		require.NoError(t, appStateCache.SetAppResourcesTree(testApp.Name,
+			&v1alpha1.ApplicationTree{Nodes: nodes}))
+		return appServer
+	}
+
+	run := func(appServer *Server) error {
+		ns := testNamespace
+		_, err := appServer.RunResourceActionV2(ctx, &application.ResourceActionRunRequestV2{
+			Name:         new("test-app"),
+			AppNamespace: new("default"),
+			Namespace:    &ns,
+			Action:       &actionName,
+			ResourceName: &resourceName,
+			Version:      &version,
+			Group:        &group,
+			Kind:         &kind,
+		})
+		return err
+	}
+
+	t.Run("only the resource's own destination is required", func(t *testing.T) {
+		// The application also declares "other", which the user is not granted. Requiring the whole
+		// set would deny an operation on a cluster the user is in fact permitted.
+		appServer := newServer(t, "p, test-user, destinations, action, default/shared, allow",
+			v1alpha1.ResourceNode{ResourceRef: ref("shared")})
+		require.NoError(t, run(appServer))
+	})
+
+	t.Run("a grant on another destination does not carry over", func(t *testing.T) {
+		appServer := newServer(t, "p, test-user, destinations, action, default/other, allow",
+			v1alpha1.ResourceNode{ResourceRef: ref("shared")})
+		err := run(appServer)
+		require.Error(t, err)
+		assert.Equal(t, codes.PermissionDenied.String(), status.Code(err).String())
+	})
+
+	t.Run("the same resource in two destinations is rejected as ambiguous", func(t *testing.T) {
+		// Permitted everywhere, so the refusal is about addressing rather than authorization.
+		appServer := newServer(t, "p, test-user, destinations, *, */*, allow",
+			v1alpha1.ResourceNode{ResourceRef: ref("shared")},
+			v1alpha1.ResourceNode{ResourceRef: ref("other")})
+		err := run(appServer)
+		require.Error(t, err)
+		assert.Equal(t, codes.InvalidArgument.String(), status.Code(err).String())
+		assert.Contains(t, err.Error(), "more than one destination")
 	})
 }

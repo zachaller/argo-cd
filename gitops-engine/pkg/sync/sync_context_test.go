@@ -3329,3 +3329,101 @@ func TestTerminate_Hooks_Error(t *testing.T) {
 	assert.Equal(t, synccommon.OperationError, results[0].HookPhase)
 	assert.Contains(t, results[0].Message, "update failed")
 }
+
+func TestSyncTaskFilterHoldsTasksBack(t *testing.T) {
+	pod := testingutils.NewPod()
+	pod.SetNamespace(testingutils.FakeArgoCDNamespace)
+
+	t.Run("a task the filter rejects is not applied and the sync does not fail", func(t *testing.T) {
+		syncCtx := newTestSyncCtx(nil, WithSyncTaskFilter(func(_ synccommon.SyncPhase, _ int) bool {
+			return false
+		}))
+		syncCtx.resources = groupResources(ReconciliationResult{
+			Live:   []*unstructured.Unstructured{nil},
+			Target: []*unstructured.Unstructured{pod},
+		})
+
+		syncCtx.Sync(context.Background())
+		phase, message, resources := syncCtx.GetState()
+
+		// Running, specifically. Holding every task back empties the task list, and the engine
+		// otherwise reads an empty list as "successfully synced (no more tasks)" -- which would
+		// report a sync as finished while its work is still outstanding.
+		assert.Equal(t, synccommon.OperationRunning, phase)
+		assert.Contains(t, message, "held back")
+		assert.Empty(t, resources, "a held-back task must not produce a result")
+	})
+
+	t.Run("a task the filter accepts is applied as usual", func(t *testing.T) {
+		syncCtx := newTestSyncCtx(nil, WithSyncTaskFilter(func(_ synccommon.SyncPhase, _ int) bool {
+			return true
+		}))
+		syncCtx.resources = groupResources(ReconciliationResult{
+			Live:   []*unstructured.Unstructured{nil},
+			Target: []*unstructured.Unstructured{pod},
+		})
+
+		syncCtx.Sync(context.Background())
+		_, _, resources := syncCtx.GetState()
+		assert.Len(t, resources, 1)
+	})
+
+	t.Run("the filter sees the task's wave", func(t *testing.T) {
+		waved := pod.DeepCopy()
+		waved.SetAnnotations(map[string]string{synccommon.AnnotationSyncWave: "3"})
+
+		var seen []int
+		syncCtx := newTestSyncCtx(nil, WithSyncTaskFilter(func(_ synccommon.SyncPhase, wave int) bool {
+			seen = append(seen, wave)
+			return true
+		}))
+		syncCtx.resources = groupResources(ReconciliationResult{
+			Live:   []*unstructured.Unstructured{nil},
+			Target: []*unstructured.Unstructured{waved},
+		})
+
+		syncCtx.Sync(context.Background())
+		assert.Contains(t, seen, 3, "the filter must receive the wave from the sync-wave annotation")
+	})
+}
+
+func TestSync_ForceSyncFailPhase_NoSyncFailHooks(t *testing.T) {
+	pod := testingutils.NewPod()
+
+	syncCtx := newTestSyncCtx(nil, WithForceSyncFailPhase("another destination failed"))
+	syncCtx.resources = groupResources(ReconciliationResult{
+		Live:   []*unstructured.Unstructured{nil},
+		Target: []*unstructured.Unstructured{pod},
+	})
+	syncCtx.dynamicIf = fake.NewSimpleDynamicClient(runtime.NewScheme())
+
+	syncCtx.Sync(context.Background())
+
+	phase, message, _ := syncCtx.GetState()
+	assert.Equal(t, synccommon.OperationFailed, phase)
+	// The caller's reason is used verbatim: no task here failed, so there is no task message to
+	// build one from.
+	assert.Equal(t, "another destination failed", message)
+}
+
+func TestSync_ForceSyncFailPhase_RunsSyncFailHooksWithoutOwnFailure(t *testing.T) {
+	pod := testingutils.NewPod()
+	syncFailHook := newHook("sync-fail-hook", synccommon.HookTypeSyncFail, synccommon.HookDeletePolicyHookSucceeded)
+
+	syncCtx := newTestSyncCtx(nil, WithForceSyncFailPhase("another destination failed"))
+	syncCtx.resources = groupResources(ReconciliationResult{
+		Live:   []*unstructured.Unstructured{pod},
+		Target: []*unstructured.Unstructured{pod},
+	})
+	syncCtx.hooks = []*unstructured.Unstructured{syncFailHook}
+	syncCtx.dynamicIf = fake.NewSimpleDynamicClient(runtime.NewScheme())
+
+	syncCtx.Sync(context.Background())
+
+	phase, _, resources := syncCtx.GetState()
+	// The hook was started and has not finished, so the operation is not terminal yet.
+	assert.Equal(t, synccommon.OperationRunning, phase)
+	hookResult := getResourceResult(resources, kube.GetResourceKey(syncFailHook))
+	require.NotNil(t, hookResult, "the SyncFail hook should have run")
+	assert.Equal(t, synccommon.ResultCodeSynced, hookResult.Status)
+}

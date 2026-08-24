@@ -13,6 +13,7 @@ argocd app delete-resource APPNAME [flags]
 ```
       --all                    Indicates whether to patch multiple matching of resources
   -N, --app-namespace string   Namespace of the application
+      --destination string     Destination the resource is in, when the application deploys to more than one and the same resource exists in several. Use "@primary" for spec.destination, otherwise a name from spec.destinations
       --force                  Indicates whether to force delete the resource
       --group string           Group
   -h, --help                   help for delete-resource

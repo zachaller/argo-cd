@@ -48,7 +48,7 @@ func (a *Actions) Create() *Actions {
 		Cluster: &v1alpha1.Cluster{
 			Server:             a.context.server,
 			Name:               a.context.GetName(),
-			Config:             v1alpha1.ClusterConfig{BearerToken: a.context.bearerToken},
+			Config:             v1alpha1.ClusterConfig{BearerToken: a.context.bearerToken, TLSClientConfig: a.context.tlsConfig},
 			Namespaces:         a.context.namespaces,
 			RefreshRequestedAt: nil,
 			Info:               v1alpha1.ClusterInfo{},

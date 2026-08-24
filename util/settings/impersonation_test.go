@@ -31,7 +31,7 @@ func TestDeriveServiceAccountToImpersonate(t *testing.T) {
 		}
 		cluster := &v1alpha1.Cluster{Server: "https://cluster-api.example.com"}
 
-		user, err := DeriveServiceAccountToImpersonate(project, app, cluster)
+		user, err := DeriveServiceAccountToImpersonate(project, app, cluster, app.Spec.Destination.Namespace)
 		require.NoError(t, err)
 		assert.Equal(t, "system:serviceaccount:dest-ns:test-sa", user)
 	})
@@ -55,7 +55,7 @@ func TestDeriveServiceAccountToImpersonate(t *testing.T) {
 		}
 		cluster := &v1alpha1.Cluster{Server: "https://cluster-api.example.com"}
 
-		user, err := DeriveServiceAccountToImpersonate(project, app, cluster)
+		user, err := DeriveServiceAccountToImpersonate(project, app, cluster, app.Spec.Destination.Namespace)
 		require.NoError(t, err)
 		assert.Equal(t, "system:serviceaccount:any-ns:test-sa", user)
 	})
@@ -79,7 +79,7 @@ func TestDeriveServiceAccountToImpersonate(t *testing.T) {
 		}
 		cluster := &v1alpha1.Cluster{Server: "https://cluster-api.example.com"}
 
-		user, err := DeriveServiceAccountToImpersonate(project, app, cluster)
+		user, err := DeriveServiceAccountToImpersonate(project, app, cluster, app.Spec.Destination.Namespace)
 		require.NoError(t, err)
 		assert.Equal(t, "system:serviceaccount:other-ns:deploy-sa", user)
 	})
@@ -105,7 +105,7 @@ func TestDeriveServiceAccountToImpersonate(t *testing.T) {
 		}
 		cluster := &v1alpha1.Cluster{Server: "https://cluster-api.example.com"}
 
-		user, err := DeriveServiceAccountToImpersonate(project, app, cluster)
+		user, err := DeriveServiceAccountToImpersonate(project, app, cluster, app.Spec.Destination.Namespace)
 		require.NoError(t, err)
 		// Should use app.Namespace ("app-ns") as the SA namespace since Destination.Namespace is empty
 		assert.Equal(t, "system:serviceaccount:app-ns:test-sa", user)
@@ -130,7 +130,7 @@ func TestDeriveServiceAccountToImpersonate(t *testing.T) {
 		}
 		cluster := &v1alpha1.Cluster{Server: "https://cluster-api.example.com"}
 
-		user, err := DeriveServiceAccountToImpersonate(project, app, cluster)
+		user, err := DeriveServiceAccountToImpersonate(project, app, cluster, app.Spec.Destination.Namespace)
 		require.NoError(t, err)
 		assert.Empty(t, user)
 	})
@@ -152,7 +152,7 @@ func TestDeriveServiceAccountToImpersonate(t *testing.T) {
 		}
 		cluster := &v1alpha1.Cluster{Server: "https://cluster-api.example.com"}
 
-		user, err := DeriveServiceAccountToImpersonate(project, app, cluster)
+		user, err := DeriveServiceAccountToImpersonate(project, app, cluster, app.Spec.Destination.Namespace)
 		require.NoError(t, err)
 		assert.Empty(t, user)
 	})
@@ -176,7 +176,7 @@ func TestDeriveServiceAccountToImpersonate(t *testing.T) {
 		}
 		cluster := &v1alpha1.Cluster{Server: "https://cluster-api.example.com"}
 
-		user, err := DeriveServiceAccountToImpersonate(project, app, cluster)
+		user, err := DeriveServiceAccountToImpersonate(project, app, cluster, app.Spec.Destination.Namespace)
 		assert.Empty(t, user)
 		assert.ErrorContains(t, err, "default service account contains invalid chars")
 	})
@@ -200,7 +200,7 @@ func TestDeriveServiceAccountToImpersonate(t *testing.T) {
 		}
 		cluster := &v1alpha1.Cluster{Server: "https://cluster-api.example.com"}
 
-		user, err := DeriveServiceAccountToImpersonate(project, app, cluster)
+		user, err := DeriveServiceAccountToImpersonate(project, app, cluster, app.Spec.Destination.Namespace)
 		assert.Empty(t, user)
 		assert.ErrorContains(t, err, "default service account contains invalid chars")
 	})
@@ -224,7 +224,7 @@ func TestDeriveServiceAccountToImpersonate(t *testing.T) {
 		}
 		cluster := &v1alpha1.Cluster{Server: "https://cluster-api.example.com"}
 
-		user, err := DeriveServiceAccountToImpersonate(project, app, cluster)
+		user, err := DeriveServiceAccountToImpersonate(project, app, cluster, app.Spec.Destination.Namespace)
 		assert.Empty(t, user)
 		assert.ErrorContains(t, err, "invalid glob pattern for destination server")
 	})
@@ -248,7 +248,7 @@ func TestDeriveServiceAccountToImpersonate(t *testing.T) {
 		}
 		cluster := &v1alpha1.Cluster{Server: "https://cluster-api.example.com"}
 
-		user, err := DeriveServiceAccountToImpersonate(project, app, cluster)
+		user, err := DeriveServiceAccountToImpersonate(project, app, cluster, app.Spec.Destination.Namespace)
 		assert.Empty(t, user)
 		assert.ErrorContains(t, err, "invalid glob pattern for destination namespace")
 	})
@@ -273,8 +273,50 @@ func TestDeriveServiceAccountToImpersonate(t *testing.T) {
 		}
 		cluster := &v1alpha1.Cluster{Server: "https://cluster-api.example.com"}
 
-		user, err := DeriveServiceAccountToImpersonate(project, app, cluster)
+		user, err := DeriveServiceAccountToImpersonate(project, app, cluster, app.Spec.Destination.Namespace)
 		require.NoError(t, err)
 		assert.Equal(t, "system:serviceaccount:dest-ns:first-sa", user)
 	})
+}
+
+// The service account is selected by the namespace of the destination being synced, which for an
+// application with additional named destinations is not spec.destination.Namespace.
+func TestDeriveServiceAccountToImpersonate_UsesDestinationNamespace(t *testing.T) {
+	t.Parallel()
+
+	project := &v1alpha1.AppProject{
+		Spec: v1alpha1.AppProjectSpec{
+			DestinationServiceAccounts: []v1alpha1.ApplicationDestinationServiceAccount{
+				{Server: "https://cluster-api.example.com", Namespace: "primary-ns", DefaultServiceAccount: "primary-sa"},
+				{Server: "https://cluster-api.example.com", Namespace: "other-ns", DefaultServiceAccount: "other-sa"},
+			},
+		},
+	}
+	app := &v1alpha1.Application{
+		Spec: v1alpha1.ApplicationSpec{
+			Destination: v1alpha1.ApplicationDestination{
+				Server:    "https://cluster-api.example.com",
+				Namespace: "primary-ns",
+			},
+			Destinations: []v1alpha1.NamedDestination{
+				{Name: "other", Server: "https://cluster-api.example.com", Namespace: "other-ns"},
+			},
+		},
+	}
+	cluster := &v1alpha1.Cluster{Server: "https://cluster-api.example.com"}
+
+	primary, err := DeriveServiceAccountToImpersonate(project, app, cluster, "primary-ns")
+	require.NoError(t, err)
+	assert.Equal(t, "system:serviceaccount:primary-ns:primary-sa", primary)
+
+	// The named destination must pick its own service account, not the primary's.
+	other, err := DeriveServiceAccountToImpersonate(project, app, cluster, "other-ns")
+	require.NoError(t, err)
+	assert.Equal(t, "system:serviceaccount:other-ns:other-sa", other)
+
+	// A namespace no entry matches yields no service account, which is the "not configured" signal
+	// the enforcement flag acts on.
+	none, err := DeriveServiceAccountToImpersonate(project, app, cluster, "unmatched-ns")
+	require.NoError(t, err)
+	assert.Empty(t, none)
 }

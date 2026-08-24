@@ -65,6 +65,7 @@ func NewApplicationResourceActionsListCommand(clientOpts *argocdclient.ClientOpt
 	var kind string
 	var group string
 	var resourceName string
+	var destination string
 	var output string
 	var appNamespace string
 	command := &cobra.Command{
@@ -87,7 +88,7 @@ func NewApplicationResourceActionsListCommand(clientOpts *argocdclient.ClientOpt
 		defer utilio.Close(conn)
 		resources, err := getActionableResourcesForApplication(ctx, appIf, &appNs, &appName)
 		errors.CheckError(err)
-		filteredObjects, err := util.FilterResources(command.Flags().Changed("group"), resources, group, kind, namespace, resourceName, true)
+		filteredObjects, err := util.FilterResources(command.Flags().Changed("group"), resources, group, kind, namespace, resourceName, destination, true)
 		errors.CheckError(err)
 		var availableActions []DisplayedAction
 		for i := range filteredObjects {
@@ -101,6 +102,7 @@ func NewApplicationResourceActionsListCommand(clientOpts *argocdclient.ClientOpt
 				Group:        new(gvk.Group),
 				Kind:         new(gvk.Kind),
 				Version:      new(gvk.Version),
+				Destination:  &destination,
 			})
 			errors.CheckError(err)
 			for _, action := range availActionsForResource.Actions {
@@ -135,6 +137,7 @@ func NewApplicationResourceActionsListCommand(clientOpts *argocdclient.ClientOpt
 	})
 	command.Flags().StringVarP(&appNamespace, "app-namespace", "N", "", "Namespace of the application")
 	command.Flags().StringVar(&resourceName, "resource-name", "", "Name of resource")
+	command.Flags().StringVar(&destination, "destination", "", "Destination the resource is in, when the application deploys to more than one and the same resource exists in several. Use \"@primary\" for spec.destination, otherwise a name from spec.destinations")
 	command.Flags().StringVar(&kind, "kind", "", "Kind")
 	command.Flags().StringVar(&group, "group", "", "Group")
 	command.Flags().StringVar(&namespace, "namespace", "", "Namespace")
@@ -148,6 +151,7 @@ func NewApplicationResourceActionsRunCommand(clientOpts *argocdclient.ClientOpti
 	var namespace string
 	var appNamespace string
 	var resourceName string
+	var destination string
 	var kind string
 	var group string
 	var all bool
@@ -162,6 +166,7 @@ func NewApplicationResourceActionsRunCommand(clientOpts *argocdclient.ClientOpti
 	}
 
 	command.Flags().StringVar(&resourceName, "resource-name", "", "Name of resource on which the action should be run")
+	command.Flags().StringVar(&destination, "destination", "", "Destination the resource is in, when the application deploys to more than one and the same resource exists in several. Use \"@primary\" for spec.destination, otherwise a name from spec.destinations")
 	command.Flags().StringVarP(&appNamespace, "app-namespace", "N", "", "Namespace of the application")
 	command.Flags().StringVar(&namespace, "namespace", "", "Namespace of the resource on which the action should be run")
 	command.Flags().StringVar(&kind, "kind", "", "Kind of the resource on which the action should be run")
@@ -183,7 +188,7 @@ func NewApplicationResourceActionsRunCommand(clientOpts *argocdclient.ClientOpti
 		defer utilio.Close(conn)
 		resources, err := getActionableResourcesForApplication(ctx, appIf, &appNs, &appName)
 		errors.CheckError(err)
-		filteredObjects, err := util.FilterResources(command.Flags().Changed("group"), resources, group, kind, namespace, resourceName, all)
+		filteredObjects, err := util.FilterResources(command.Flags().Changed("group"), resources, group, kind, namespace, resourceName, destination, all)
 		errors.CheckError(err)
 		resGroup := filteredObjects[0].GroupVersionKind().Group
 		for i := range filteredObjects[1:] {
@@ -205,6 +210,7 @@ func NewApplicationResourceActionsRunCommand(clientOpts *argocdclient.ClientOpti
 				Kind:         new(gvk.Kind),
 				Version:      new(gvk.GroupVersion().Version),
 				Action:       new(actionName),
+				Destination:  &destination,
 				// TODO: add support for parameters
 			})
 			if err == nil {

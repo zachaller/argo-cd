@@ -176,6 +176,10 @@ message ApplicationResourceRequest {
 	required string kind = 6;
 	optional string appNamespace = 7;
 	optional string project = 8;
+	// destination selects which of the application's destinations the resource is in. Empty resolves
+	// it automatically, which fails when the same resource exists in more than one. "@primary"
+	// addresses spec.destination; any other value names an entry in spec.destinations.
+	optional string destination = 9;
 }
 
 message ApplicationResourcePatchRequest {
@@ -189,6 +193,10 @@ message ApplicationResourcePatchRequest {
 	required string patchType = 8;
 	optional string appNamespace = 9;
 	optional string project = 10;
+	// destination selects which of the application's destinations the resource is in. Empty resolves
+	// it automatically, which fails when the same resource exists in more than one. "@primary"
+	// addresses spec.destination; any other value names an entry in spec.destinations.
+	optional string destination = 11;
 }
 
 message ApplicationResourceDeleteRequest {
@@ -202,6 +210,10 @@ message ApplicationResourceDeleteRequest {
 	optional bool orphan = 8;
 	optional string appNamespace = 9;
 	optional string project = 10;
+	// destination selects which of the application's destinations the resource is in. Empty resolves
+	// it automatically, which fails when the same resource exists in more than one. "@primary"
+	// addresses spec.destination; any other value names an entry in spec.destinations.
+	optional string destination = 11;
 }
 
 message ResourceActionParameters {
@@ -222,6 +234,10 @@ message ResourceActionRunRequest {
 	required string action = 7;
 	optional string appNamespace = 8;
 	optional string project = 9;
+	// destination selects which of the application's destinations the resource is in. Empty resolves
+	// it automatically, which fails when the same resource exists in more than one. "@primary"
+	// addresses spec.destination; any other value names an entry in spec.destinations.
+	optional string destination = 10;
 }
 
 message ResourceActionRunRequestV2 {
@@ -235,6 +251,10 @@ message ResourceActionRunRequestV2 {
 	optional string appNamespace = 8;
 	optional string project = 9;
 	repeated ResourceActionParameters resourceActionParameters = 10;
+	// destination selects which of the application's destinations the resource is in. Empty resolves
+	// it automatically, which fails when the same resource exists in more than one. "@primary"
+	// addresses spec.destination; any other value names an entry in spec.destinations.
+	optional string destination = 11;
 }
 
 message ResourceActionsListResponse {

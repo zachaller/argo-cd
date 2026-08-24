@@ -16,10 +16,13 @@ const (
 
 // DeriveServiceAccountToImpersonate determines the service account to be used for impersonation for the sync operation.
 // The returned service account will be fully qualified including namespace and the service account name in the format system:serviceaccount:<namespace>:<service_account>
-func DeriveServiceAccountToImpersonate(project *v1alpha1.AppProject, application *v1alpha1.Application, destCluster *v1alpha1.Cluster) (string, error) {
-	// spec.Destination.Namespace is optional. If not specified, use the Application's
-	// namespace
-	serviceAccountNamespace := application.Spec.Destination.Namespace
+//
+// destNamespace is the namespace of the destination being synced, which is not necessarily
+// application.Spec.Destination.Namespace: an application may deploy to additional named
+// destinations, and each must select its own service account.
+func DeriveServiceAccountToImpersonate(project *v1alpha1.AppProject, application *v1alpha1.Application, destCluster *v1alpha1.Cluster, destNamespace string) (string, error) {
+	// The destination namespace is optional. If not specified, use the Application's namespace.
+	serviceAccountNamespace := destNamespace
 	if serviceAccountNamespace == "" {
 		serviceAccountNamespace = application.Namespace
 	}
@@ -30,7 +33,7 @@ func DeriveServiceAccountToImpersonate(project *v1alpha1.AppProject, application
 		if err != nil {
 			return "", fmt.Errorf("invalid glob pattern for destination server: %w", err)
 		}
-		dstNamespaceMatched, err := glob.MatchWithError(item.Namespace, application.Spec.Destination.Namespace)
+		dstNamespaceMatched, err := glob.MatchWithError(item.Namespace, destNamespace)
 		if err != nil {
 			return "", fmt.Errorf("invalid glob pattern for destination namespace: %w", err)
 		}

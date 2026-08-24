@@ -696,6 +696,11 @@ message ApplicationSpec {
   // Destination is a reference to the target Kubernetes server and namespace
   optional ApplicationDestination destination = 2;
 
+  // Destinations is a list of additional named destinations that individual manifests may target
+  // using the argocd.argoproj.io/destination annotation. Manifests without that annotation are
+  // deployed to Destination.
+  repeated NamedDestination destinations = 10;
+
   // Project is a reference to the project this application belongs to.
   // The empty string means that application belongs to the 'default' project.
   optional string project = 3;
@@ -1045,6 +1050,9 @@ message ComparedTo {
 
   // IgnoreDifferences is a reference to the application's ignored differences used for comparison
   repeated ResourceIgnoreDifferences ignoreDifferences = 4;
+
+  // Destinations is a reference to the application's additional named destinations used for comparison
+  repeated NamedDestination destinations = 5;
 }
 
 // ComponentParameter contains information about component parameter value
@@ -1285,6 +1293,11 @@ message HostInfo {
 
   // Labels holds the labels attached to the host.
   map<string, string> labels = 4;
+
+  // Destination is the name of the Application destination whose cluster this host belongs to,
+  // empty for spec.destination. Node names are only unique within a cluster, so without it two
+  // clusters' identically named nodes are indistinguishable once the lists are merged.
+  optional string destination = 5;
 }
 
 // HostResourceInfo represents resource usage details for a specific resource type on a host.
@@ -1494,6 +1507,25 @@ message MergeGenerator {
   repeated string mergeKeys = 2;
 
   optional ApplicationSetTemplate template = 3;
+}
+
+// NamedDestination is an additional deployment destination of an Application. Individual manifests
+// select one by name using the argocd.argoproj.io/destination annotation. Manifests without that
+// annotation are deployed to the Application's spec.destination.
+message NamedDestination {
+  // Name uniquely identifies this destination within the Application. It is the value referenced by
+  // the argocd.argoproj.io/destination annotation on a manifest. It must not contain '/' or '@'.
+  optional string name = 1;
+
+  // Server specifies the URL of the target cluster's Kubernetes control plane API. This must be set if ClusterName is not set.
+  optional string server = 2;
+
+  // Namespace specifies the target namespace for resources routed to this destination.
+  // The namespace will only be set for namespace-scoped resources that have not set a value for .metadata.namespace
+  optional string namespace = 3;
+
+  // ClusterName is an alternate way of specifying the target cluster by its symbolic name. This must be set if Server is not set.
+  optional string clusterName = 4;
 }
 
 // NestedMatrixGenerator is a MatrixGenerator nested under another combination-type generator (MatrixGenerator or
@@ -2160,6 +2192,10 @@ message ResourceDiff {
 
   // Modified indicates whether the live resource has changes compared to the target resource.
   optional bool modified = 12;
+
+  // Destination is the name of the Application destination this resource belongs to.
+  // Empty means the Application's spec.destination.
+  optional string destination = 13;
 }
 
 // ResourceIgnoreDifferences contains resource filter and list of json paths which should be ignored during comparison with live state.
@@ -2264,6 +2300,10 @@ message ResourceRef {
   optional string name = 5;
 
   optional string uid = 6;
+
+  // Destination is the name of the Application destination this resource belongs to.
+  // Empty means the Application's spec.destination.
+  optional string destination = 7;
 }
 
 // ResourceResult holds the operation result details of a specific resource
@@ -2301,6 +2341,10 @@ message ResourceResult {
 
   // Images contains the images related to the ResourceResult
   repeated string images = 11;
+
+  // Destination is the name of the Application destination this resource was synced to.
+  // Empty means the Application's spec.destination.
+  optional string destination = 12;
 }
 
 // ResourceStatus holds the current synchronization and health status of a Kubernetes resource.
@@ -2338,6 +2382,10 @@ message ResourceStatus {
 
   // RequiresDeletionConfirmation is true if the resource requires explicit user confirmation before deletion.
   optional bool requiresDeletionConfirmation = 11;
+
+  // Destination is the name of the Application destination this resource is deployed to.
+  // Empty means the Application's spec.destination.
+  optional string destination = 12;
 }
 
 // RetryStrategy contains information about the strategy to apply when a sync failed
@@ -2795,6 +2843,10 @@ message SyncOperationResult {
 
   // ManagedNamespaceMetadata contains the current sync state of managed namespace metadata
   optional ManagedNamespaceMetadata managedNamespaceMetadata = 6;
+
+  // WaveFrontier tracks how far a sync spanning multiple destinations has progressed through the
+  // shared sync-wave schedule. It is unset for an application with a single destination.
+  optional SyncWaveFrontier waveFrontier = 7;
 }
 
 // SyncPolicy controls when a sync will be performed in response to updates in git
@@ -2886,6 +2938,18 @@ message SyncStrategyHook {
   // Embed SyncStrategyApply type to inherit any `apply` options
   // +optional
   optional SyncStrategyApply syncStrategyApply = 1;
+}
+
+// SyncWaveFrontier is the point in the shared sync-wave schedule that every destination of a
+// multi-destination sync has been allowed to reach. No destination applies work beyond it until all
+// of them have finished it, which is what makes sync waves order across clusters rather than only
+// within one.
+message SyncWaveFrontier {
+  // Phase is the sync phase, one of PreSync, Sync or PostSync.
+  optional string phase = 1;
+
+  // Wave is the sync wave within that phase.
+  optional int64 wave = 2;
 }
 
 // SyncWindow contains the kind, time, duration and attributes that are used to assign the syncWindows to apps

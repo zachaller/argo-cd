@@ -1243,7 +1243,7 @@ func (server *ArgoCDServer) newHTTPServer(ctx context.Context, port int, grpcWeb
 
 	terminalOpts := application.TerminalOptions{DisableAuth: server.DisableAuth, Enf: server.enf}
 
-	terminal := application.NewHandler(server.appLister, server.Namespace, server.ApplicationNamespaces, server.db, appResourceTreeFn, server.settings.ExecShells, server.sessionMgr, &terminalOpts).
+	terminal := application.NewHandler(server.appLister, server.Namespace, server.ApplicationNamespaces, server.db, appResourceTreeFn, server.settings.ExecShells, server.sessionMgr, &terminalOpts, server.settingsMgr).
 		WithFeatureFlagMiddleware(server.settingsMgr.GetSettings)
 	th := util_session.WithAuthMiddleware(server.DisableAuth, server.settings.IsSSOConfigured(), server.ssoClientApp, server.sessionMgr, terminal)
 	mux.Handle("/terminal", th)

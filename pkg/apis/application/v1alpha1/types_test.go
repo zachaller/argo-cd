@@ -6230,3 +6230,262 @@ func TestGetDrySource_PreservesAllFields(t *testing.T) {
 		})
 	}
 }
+
+func TestNamedDestination_ToApplicationDestination(t *testing.T) {
+	t.Parallel()
+
+	t.Run("server based", func(t *testing.T) {
+		t.Parallel()
+		d := NamedDestination{Name: "prod", Server: "https://prod.example.com", Namespace: "apps"}
+		assert.Equal(t, ApplicationDestination{Server: "https://prod.example.com", Namespace: "apps"}, d.ToApplicationDestination())
+	})
+
+	t.Run("cluster name maps onto the destination name field", func(t *testing.T) {
+		t.Parallel()
+		d := NamedDestination{Name: "prod", ClusterName: "prod-cluster", Namespace: "apps"}
+		assert.Equal(t, ApplicationDestination{Name: "prod-cluster", Namespace: "apps"}, d.ToApplicationDestination())
+	})
+}
+
+func TestApplicationSpec_HasMultipleDestinations(t *testing.T) {
+	t.Parallel()
+
+	spec := ApplicationSpec{Destination: ApplicationDestination{Server: "https://kubernetes.default.svc"}}
+	assert.False(t, spec.HasMultipleDestinations())
+
+	spec.Destinations = []NamedDestination{{Name: "prod", Server: "https://prod.example.com"}}
+	assert.True(t, spec.HasMultipleDestinations())
+}
+
+func TestApplicationSpec_AllDestinations(t *testing.T) {
+	t.Parallel()
+
+	t.Run("primary only", func(t *testing.T) {
+		t.Parallel()
+		spec := ApplicationSpec{Destination: ApplicationDestination{Server: "https://kubernetes.default.svc", Namespace: "default"}}
+		assert.Equal(t, []NamedDestination{
+			{Server: "https://kubernetes.default.svc", Namespace: "default"},
+		}, spec.AllDestinations())
+	})
+
+	t.Run("primary first, then named in declaration order", func(t *testing.T) {
+		t.Parallel()
+		spec := ApplicationSpec{
+			Destination: ApplicationDestination{Name: "in-cluster", Namespace: "default"},
+			Destinations: []NamedDestination{
+				{Name: "prod", Server: "https://prod.example.com", Namespace: "apps"},
+				{Name: "shared", ClusterName: "shared-cluster", Namespace: "infra"},
+			},
+		}
+		assert.Equal(t, []NamedDestination{
+			{ClusterName: "in-cluster", Namespace: "default"},
+			{Name: "prod", Server: "https://prod.example.com", Namespace: "apps"},
+			{Name: "shared", ClusterName: "shared-cluster", Namespace: "infra"},
+		}, spec.AllDestinations())
+	})
+}
+
+func TestApplicationSpec_GetDestination(t *testing.T) {
+	t.Parallel()
+
+	spec := ApplicationSpec{
+		Destination: ApplicationDestination{Server: "https://kubernetes.default.svc", Namespace: "default"},
+		Destinations: []NamedDestination{
+			{Name: "prod", Server: "https://prod.example.com", Namespace: "apps"},
+		},
+	}
+
+	t.Run("empty name returns the primary destination", func(t *testing.T) {
+		t.Parallel()
+		dest, err := spec.GetDestination("")
+		require.NoError(t, err)
+		assert.Equal(t, spec.Destination, dest)
+	})
+
+	t.Run("named destination", func(t *testing.T) {
+		t.Parallel()
+		dest, err := spec.GetDestination("prod")
+		require.NoError(t, err)
+		assert.Equal(t, ApplicationDestination{Server: "https://prod.example.com", Namespace: "apps"}, dest)
+	})
+
+	t.Run("unknown name is an error, never a fallback to the primary", func(t *testing.T) {
+		t.Parallel()
+		_, err := spec.GetDestination("staging")
+		require.ErrorContains(t, err, "staging")
+	})
+}
+
+func TestApplicationSpec_BuildComparedToStatus_CarriesDestinations(t *testing.T) {
+	t.Parallel()
+
+	// ComparedTo must carry the named destinations, otherwise editing spec.destinations
+	// would not trigger a refresh.
+	spec := ApplicationSpec{
+		Destination:  ApplicationDestination{Server: "https://kubernetes.default.svc"},
+		Destinations: []NamedDestination{{Name: "prod", Server: "https://prod.example.com"}},
+	}
+	ct := spec.BuildComparedToStatus([]ApplicationSource{{RepoURL: "https://github.com/argoproj/test.git"}})
+	assert.Equal(t, spec.Destinations, ct.Destinations)
+	assert.Equal(t, spec.Destination, ct.Destination)
+}
+
+func TestResourceNodeFullNameIncludesDestination(t *testing.T) {
+	t.Parallel()
+
+	node := ResourceNode{ResourceRef: ResourceRef{
+		Group: "apps", Kind: "Deployment", Namespace: "ns", Name: "web",
+	}}
+
+	// An application that declares no named destinations produces exactly the string it always has.
+	assert.Equal(t, "apps/Deployment/ns/web", node.FullName())
+
+	node.Destination = "prod"
+	assert.Equal(t, "prod/apps/Deployment/ns/web", node.FullName())
+
+	diff := ResourceDiff{Group: "apps", Kind: "Deployment", Namespace: "ns", Name: "web"}
+	assert.Equal(t, "apps/Deployment/ns/web", diff.FullName())
+	diff.Destination = "prod"
+	assert.Equal(t, "prod/apps/Deployment/ns/web", diff.FullName())
+}
+
+func TestApplicationTreeFindNode(t *testing.T) {
+	t.Parallel()
+
+	node := func(destination, name string) ResourceNode {
+		return ResourceNode{ResourceRef: ResourceRef{
+			Group: "apps", Kind: "Deployment", Namespace: "ns", Name: name,
+			UID: destination + "-" + name, Destination: destination,
+		}}
+	}
+
+	t.Run("a single match is returned with its destination", func(t *testing.T) {
+		t.Parallel()
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("prod", "web"), node("", "api")}}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web", "")
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, "prod", found.Destination, "the caller routes to this cluster")
+	})
+
+	t.Run("orphaned nodes are searched too", func(t *testing.T) {
+		t.Parallel()
+		tree := &ApplicationTree{OrphanedNodes: []ResourceNode{node("prod", "web")}}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web", "")
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, "prod", found.Destination)
+	})
+
+	t.Run("no match is not an error", func(t *testing.T) {
+		t.Parallel()
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("prod", "web")}}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "absent", "")
+		require.NoError(t, err)
+		assert.Nil(t, found)
+	})
+
+	t.Run("the same resource in two destinations is ambiguous", func(t *testing.T) {
+		t.Parallel()
+		// The request names a group, kind, namespace and name and nothing else, so resolving to
+		// either node would act against a cluster the caller did not choose.
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("prod", "web"), node("staging", "web")}}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web", "")
+		require.Error(t, err)
+		assert.Nil(t, found)
+		assert.Contains(t, err.Error(), "prod")
+		assert.Contains(t, err.Error(), "staging")
+	})
+
+	t.Run("the primary destination is named by its field in the error", func(t *testing.T) {
+		t.Parallel()
+		// It has no name of its own, so reporting an empty one would tell the user nothing.
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("", "web"), node("prod", "web")}}
+
+		_, err := tree.FindNode("apps", "Deployment", "ns", "web", "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), PrimaryDestinationSelector, "the error has to name something the caller can pass back")
+	})
+
+	t.Run("duplicates within one destination are not ambiguous", func(t *testing.T) {
+		t.Parallel()
+		// The same node reachable twice says nothing about which cluster is meant.
+		tree := &ApplicationTree{
+			Nodes:         []ResourceNode{node("prod", "web")},
+			OrphanedNodes: []ResourceNode{node("prod", "web")},
+		}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web", "")
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, "prod", found.Destination)
+	})
+
+	t.Run("a selector picks one of two otherwise ambiguous destinations", func(t *testing.T) {
+		t.Parallel()
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("prod", "web"), node("staging", "web")}}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web", "staging")
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Equal(t, "staging", found.Destination)
+		assert.Equal(t, "staging-web", found.UID, "the node from the named destination, not merely one with the right name")
+	})
+
+	t.Run("the primary destination is selected by name, not by an empty selector", func(t *testing.T) {
+		t.Parallel()
+		// Empty means "no destination given", so the primary needs a selector of its own.
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("", "web"), node("prod", "web")}}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web", PrimaryDestinationSelector)
+		require.NoError(t, err)
+		require.NotNil(t, found)
+		assert.Empty(t, found.Destination, "the primary destination")
+		assert.Equal(t, "-web", found.UID)
+	})
+
+	t.Run("a selector naming no destination finds nothing rather than falling back", func(t *testing.T) {
+		t.Parallel()
+		// Falling back to another destination would act on a cluster the caller did not ask for.
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("prod", "web")}}
+
+		found, err := tree.FindNode("apps", "Deployment", "ns", "web", "staging")
+		require.NoError(t, err)
+		assert.Nil(t, found)
+	})
+
+	t.Run("a selector round-trips from the node it identifies", func(t *testing.T) {
+		t.Parallel()
+		// What a client echoes back after looking at a node has to select that same node.
+		tree := &ApplicationTree{Nodes: []ResourceNode{node("", "web"), node("prod", "web")}}
+
+		for _, want := range []string{"", "prod"} {
+			found, err := tree.FindNode("apps", "Deployment", "ns", "web", DestinationSelectorFor(want))
+			require.NoError(t, err)
+			require.NotNil(t, found)
+			assert.Equal(t, want, found.Destination)
+		}
+	})
+}
+
+func TestApplicationTreeNormalizeSortsByDestination(t *testing.T) {
+	t.Parallel()
+
+	node := func(destination string) ResourceNode {
+		return ResourceNode{ResourceRef: ResourceRef{
+			Group: "apps", Kind: "Deployment", Namespace: "ns", Name: "web", Destination: destination,
+		}}
+	}
+
+	// Without the destination in the sort key these compare equal, so their order after a merge
+	// depends on the input order and the cached tree churns for no reason.
+	tree := &ApplicationTree{Nodes: []ResourceNode{node("staging"), node("prod")}}
+	tree.Normalize()
+
+	assert.Equal(t, []string{"prod", "staging"},
+		[]string{tree.Nodes[0].Destination, tree.Nodes[1].Destination})
+}

@@ -69,10 +69,14 @@ type namespacedResource struct {
 }
 
 type fakeData struct {
-	apps                            []runtime.Object
-	manifestResponse                *apiclient.ManifestResponse
-	manifestResponses               []*apiclient.ManifestResponse
-	managedLiveObjs                 map[kube.ResourceKey]*unstructured.Unstructured
+	apps              []runtime.Object
+	manifestResponse  *apiclient.ManifestResponse
+	manifestResponses []*apiclient.ManifestResponse
+	managedLiveObjs   map[kube.ResourceKey]*unstructured.Unstructured
+	// managedLiveObjsByCluster, when set, gives each cluster its own live objects, keyed by server
+	// URL. The single managedLiveObjs above is returned for every cluster, which cannot represent an
+	// application whose destinations are different clusters holding different resources.
+	managedLiveObjsByCluster        map[string]map[kube.ResourceKey]*unstructured.Unstructured
 	namespacedResources             map[kube.ResourceKey]namespacedResource
 	configMapData                   map[string]string
 	metricsCacheExpiration          time.Duration
@@ -94,16 +98,24 @@ type MockKubectl struct {
 	kube.Kubectl
 
 	DeletedResources []kube.ResourceKey
+	// DeletedFromHosts records the API server each delete was sent to, parallel to DeletedResources,
+	// so a test can tell which cluster a resource was removed from.
+	DeletedFromHosts []string
 	CreatedResources []*unstructured.Unstructured
+	// CreatedOnHosts records the API server each create was sent to, parallel to CreatedResources,
+	// so a test can tell which cluster a delete hook was created in.
+	CreatedOnHosts []string
 }
 
 func (m *MockKubectl) CreateResource(ctx context.Context, config *rest.Config, gvk schema.GroupVersionKind, name string, namespace string, obj *unstructured.Unstructured, createOptions metav1.CreateOptions, subresources ...string) (*unstructured.Unstructured, error) {
 	m.CreatedResources = append(m.CreatedResources, obj)
+	m.CreatedOnHosts = append(m.CreatedOnHosts, config.Host)
 	return m.Kubectl.CreateResource(ctx, config, gvk, name, namespace, obj, createOptions, subresources...)
 }
 
 func (m *MockKubectl) DeleteResource(ctx context.Context, config *rest.Config, gvk schema.GroupVersionKind, name string, namespace string, deleteOptions metav1.DeleteOptions) error {
 	m.DeletedResources = append(m.DeletedResources, kube.NewResourceKey(gvk.Group, gvk.Kind, namespace, name))
+	m.DeletedFromHosts = append(m.DeletedFromHosts, config.Host)
 	return m.Kubectl.DeleteResource(ctx, config, gvk, name, namespace, deleteOptions)
 }
 
@@ -278,7 +290,16 @@ func newFakeControllerWithResync(ctx context.Context, data *fakeData, appResyncP
 	ctrl.appStateManager.(*appStateManager).liveStateCache = mockStateCache
 	ctrl.stateCache = mockStateCache
 	mockStateCache.EXPECT().IsNamespaced(mock.Anything, mock.Anything).Return(true, nil)
-	mockStateCache.EXPECT().GetManagedLiveObjs(mock.Anything, mock.Anything, mock.Anything).Return(data.managedLiveObjs, nil)
+	mockStateCache.EXPECT().GetManagedLiveObjs(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(cluster *v1alpha1.Cluster, _ *v1alpha1.Application, _ []*unstructured.Unstructured) (map[kube.ResourceKey]*unstructured.Unstructured, error) {
+			if data.managedLiveObjsByCluster != nil {
+				if objs, ok := data.managedLiveObjsByCluster[cluster.Server]; ok {
+					return objs, nil
+				}
+				return map[kube.ResourceKey]*unstructured.Unstructured{}, nil
+			}
+			return data.managedLiveObjs, nil
+		})
 	mockStateCache.EXPECT().GetVersionsInfo(mock.Anything).Return("v1.2.3", nil, nil)
 	response := make(map[kube.ResourceKey]v1alpha1.ResourceNode)
 	for k, v := range data.namespacedResources {
@@ -496,6 +517,45 @@ var fakePreDeleteHook = `
         ]
       }
     ]
+  }
+}
+`
+
+// fakeSecondDestinationPostDeleteHook is a PostDelete hook routed to a named destination. It
+// declares no namespace, so the namespace it is created with proves it was defaulted from the
+// destination it was routed to rather than from spec.destination.
+var fakeSecondDestinationPostDeleteHook = `
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {
+    "name": "second-post-delete-hook",
+    "annotations": {
+      "argocd.argoproj.io/hook": "PostDelete",
+      "argocd.argoproj.io/hook-delete-policy": "HookSucceeded",
+      "argocd.argoproj.io/destination": "second"
+    }
+  },
+  "spec": {
+    "template": {
+      "metadata": {
+        "name": "second-post-delete-hook"
+      },
+      "spec": {
+        "containers": [
+          {
+            "name": "second-post-delete-hook",
+            "image": "busybox",
+            "command": [
+              "sh",
+              "-c",
+              "sleep 1"
+            ]
+          }
+        ],
+        "restartPolicy": "Never"
+      }
+    }
   }
 }
 `
@@ -1048,6 +1108,23 @@ func TestAutoSyncParameterOverrides(t *testing.T) {
 }
 
 // TestFinalizeAppDeletion verifies application deletion
+// newSecondClusterSecret returns a cluster secret for a second destination, so a test can give an
+// application destinations that resolve to genuinely different clusters.
+func newSecondClusterSecret() *corev1.Secret {
+	return &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "second-cluster-secret",
+			Namespace: test.FakeArgoCDNamespace,
+			Labels:    map[string]string{"argocd.argoproj.io/secret-type": "cluster"},
+		},
+		Data: map[string][]byte{
+			"name":   []byte("second"),
+			"server": []byte("https://second.example.com"),
+			"config": []byte(`{"bearerToken":"fake","tlsClientConfig":{"insecure":true},"awsAuthConfig":null}`),
+		},
+	}
+}
+
 func TestFinalizeAppDeletion(t *testing.T) {
 	now := metav1.Now()
 	defaultProj := v1alpha1.AppProject{
@@ -1152,6 +1229,52 @@ func TestFinalizeAppDeletion(t *testing.T) {
 		for _, o := range ctrl.kubectl.(*MockKubectl).DeletedResources {
 			assert.NotEqual(t, "test-cm", o.Name)
 		}
+	})
+
+	// Resources routed to a named destination live in that cluster, and nothing else will ever
+	// remove them, so deletion has to reach every destination the application declares.
+	t.Run("CascadingDeleteAcrossDestinations", func(t *testing.T) {
+		secondCluster := newSecondClusterSecret()
+
+		app := newFakeApp()
+		app.SetCascadedDeletion(v1alpha1.ResourcesFinalizerName)
+		app.DeletionTimestamp = &now
+		app.Spec.Destination.Namespace = test.FakeArgoCDNamespace
+		app.Spec.Destinations = []v1alpha1.NamedDestination{
+			{Name: "second", Server: "https://second.example.com", Namespace: "second"},
+		}
+		// A managed resource rather than the Application itself: shouldBeDeleted skips an
+		// application's own object, so using it would assert nothing.
+		cm := newFakeCM()
+		managedObj := kube.MustToUnstructured(&cm)
+
+		ctrl := newFakeController(t.Context(), &fakeData{
+			apps:           []runtime.Object{app, &defaultProj},
+			additionalObjs: []runtime.Object{secondCluster},
+			managedLiveObjs: map[kube.ResourceKey]*unstructured.Unstructured{
+				kube.GetResourceKey(managedObj): managedObj,
+			},
+		}, nil)
+
+		fakeAppCs := ctrl.applicationClientset.(*appclientset.Clientset)
+		defaultReactor := fakeAppCs.ReactionChain[0]
+		fakeAppCs.ReactionChain = nil
+		fakeAppCs.AddReactor("get", "*", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+			return defaultReactor.React(action)
+		})
+		fakeAppCs.AddReactor("patch", "*", func(_ kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+			return true, &v1alpha1.Application{}, nil
+		})
+
+		err := ctrl.finalizeApplicationDeletion(t.Context(), app, func(_ string) ([]*v1alpha1.Cluster, error) {
+			return []*v1alpha1.Cluster{}, nil
+		})
+		require.NoError(t, err)
+
+		assert.ElementsMatch(t,
+			[]string{"https://localhost:6443", "https://second.example.com"},
+			ctrl.kubectl.(*MockKubectl).DeletedFromHosts,
+			"the resource must be deleted from both the primary and the named destination")
 	})
 
 	t.Run("DeleteWithDestinationClusterName", func(t *testing.T) {
@@ -1516,6 +1639,119 @@ func TestFinalizeAppDeletion(t *testing.T) {
 		assert.False(t, patched)
 	})
 
+	// A delete hook is a manifest like any other: it belongs in the destination its annotation
+	// names. Running every hook in the primary destination would run it against a cluster whose
+	// resources it was never written for.
+	t.Run("PostDelete_HookRunsInAnnotatedDestination", func(t *testing.T) {
+		app := newFakeApp()
+		app.SetPostDeleteFinalizer()
+		app.Spec.Destination.Namespace = test.FakeArgoCDNamespace
+		app.Spec.Destinations = []v1alpha1.NamedDestination{
+			{Name: "second", Server: "https://second.example.com", Namespace: "second"},
+		}
+		ctrl := newFakeController(t.Context(), &fakeData{
+			manifestResponses: []*apiclient.ManifestResponse{{
+				Manifests: []string{fakePostDeleteHook, fakeSecondDestinationPostDeleteHook},
+			}},
+			apps:            []runtime.Object{app, &defaultProj},
+			additionalObjs:  []runtime.Object{newSecondClusterSecret()},
+			managedLiveObjs: map[kube.ResourceKey]*unstructured.Unstructured{},
+		}, nil)
+
+		fakeAppCs := ctrl.applicationClientset.(*appclientset.Clientset)
+		defaultReactor := fakeAppCs.ReactionChain[0]
+		fakeAppCs.ReactionChain = nil
+		fakeAppCs.AddReactor("get", "*", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+			return defaultReactor.React(action)
+		})
+		fakeAppCs.AddReactor("patch", "*", func(_ kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+			return true, &v1alpha1.Application{}, nil
+		})
+		err := ctrl.finalizeApplicationDeletion(t.Context(), app, func(_ string) ([]*v1alpha1.Cluster, error) {
+			return []*v1alpha1.Cluster{}, nil
+		})
+		require.NoError(t, err)
+
+		kubectl := ctrl.kubectl.(*MockKubectl)
+		require.Len(t, kubectl.CreatedResources, 2)
+		createdOn := map[string]string{}
+		createdIn := map[string]string{}
+		for i, obj := range kubectl.CreatedResources {
+			createdOn[obj.GetName()] = kubectl.CreatedOnHosts[i]
+			createdIn[obj.GetName()] = obj.GetNamespace()
+		}
+		assert.Equal(t, map[string]string{
+			"post-delete-hook":        "https://localhost:6443",
+			"second-post-delete-hook": "https://second.example.com",
+		}, createdOn, "each hook must be created in the cluster its destination annotation names")
+		assert.Equal(t, "second", createdIn["second-post-delete-hook"],
+			"a hook without a namespace must default to its own destination's namespace")
+	})
+
+	// Cleanup has to reach every destination too: a hook left behind in a named destination is
+	// never removed by anything else once the application is gone.
+	t.Run("PostDelete_HooksCleanedUpInEveryDestination", func(t *testing.T) {
+		app := newFakeApp()
+		app.SetPostDeleteFinalizer("cleanup")
+		app.Spec.Destination.Namespace = test.FakeArgoCDNamespace
+		app.Spec.Destinations = []v1alpha1.NamedDestination{
+			{Name: "second", Server: "https://second.example.com", Namespace: "second"},
+		}
+
+		completed := func(hook *unstructured.Unstructured) *unstructured.Unstructured {
+			conditions := []any{
+				map[string]any{
+					"type":   "Complete",
+					"status": "True",
+				},
+			}
+			require.NoError(t, unstructured.SetNestedField(hook.Object, conditions, "status", "conditions"))
+			return hook
+		}
+
+		primaryHook := completed(&unstructured.Unstructured{Object: newFakePostDeleteHook()})
+		secondHook := completed(&unstructured.Unstructured{Object: newFakePostDeleteHook()})
+		secondHook.SetName("second-post-delete-hook")
+		secondHook.SetNamespace("second")
+
+		ctrl := newFakeController(t.Context(), &fakeData{
+			apps:           []runtime.Object{app, &defaultProj},
+			additionalObjs: []runtime.Object{newSecondClusterSecret()},
+			managedLiveObjsByCluster: map[string]map[kube.ResourceKey]*unstructured.Unstructured{
+				"https://localhost:6443": {
+					kube.GetResourceKey(primaryHook): primaryHook,
+				},
+				"https://second.example.com": {
+					kube.GetResourceKey(secondHook): secondHook,
+				},
+			},
+		}, nil)
+
+		fakeAppCs := ctrl.applicationClientset.(*appclientset.Clientset)
+		defaultReactor := fakeAppCs.ReactionChain[0]
+		fakeAppCs.ReactionChain = nil
+		fakeAppCs.AddReactor("get", "*", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+			return defaultReactor.React(action)
+		})
+		fakeAppCs.AddReactor("patch", "*", func(_ kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+			return true, &v1alpha1.Application{}, nil
+		})
+		err := ctrl.finalizeApplicationDeletion(t.Context(), app, func(_ string) ([]*v1alpha1.Cluster, error) {
+			return []*v1alpha1.Cluster{}, nil
+		})
+		require.NoError(t, err)
+
+		kubectl := ctrl.kubectl.(*MockKubectl)
+		deletedOn := map[string]string{}
+		for i, res := range kubectl.DeletedResources {
+			deletedOn[res.Name] = kubectl.DeletedFromHosts[i]
+		}
+		assert.Equal(t, map[string]string{
+			"post-delete-hook":        "https://localhost:6443",
+			"second-post-delete-hook": "https://second.example.com",
+		}, deletedOn, "each destination's hooks must be cleaned up in its own cluster")
+	})
+
 	// Ensure cache is cleared using correct key (InstanceName) for apps in different namespace
 	t.Run("MultiNamespaceCacheClear", func(t *testing.T) {
 		// Create a project that allows apps from other-ns namespace
@@ -1839,7 +2075,7 @@ func TestGetResourceTree_HasOrphanedResources(t *testing.T) {
 			kube.NewResourceKey("apps", "Deployment", "default", "deploy2"):          {ResourceNode: orphanedDeploy2},
 		},
 	}, nil)
-	tree, err := ctrl.getResourceTree(&v1alpha1.Cluster{Server: "https://localhost:6443", Name: "fake-cluster"}, app, []*v1alpha1.ResourceDiff{{
+	tree, err := ctrl.getResourceTree(singleDest(&v1alpha1.Cluster{Server: "https://localhost:6443", Name: "fake-cluster"}), []string{argo.PrimaryDestinationName}, app, []*v1alpha1.ResourceDiff{{
 		Namespace:   "default",
 		Name:        "nginx-deployment",
 		Kind:        "Deployment",
@@ -3588,13 +3824,15 @@ func TestGetAppHosts(t *testing.T) {
 	})).Return(nil).Maybe()
 	ctrl.stateCache = mockStateCache
 
-	hosts, err := ctrl.getAppHosts(&v1alpha1.Cluster{Server: "test", Name: "test"}, app, []v1alpha1.ResourceNode{{
+	appNodes := []v1alpha1.ResourceNode{{
 		ResourceRef: v1alpha1.ResourceRef{Name: "pod1", Namespace: "default", Kind: kube.PodKind},
 		Info: []v1alpha1.InfoItem{{
 			Name:  "Host",
 			Value: "Minikube",
 		}},
-	}})
+	}}
+
+	hosts, err := ctrl.getAppHosts(&v1alpha1.Cluster{Server: "test", Name: "test"}, "", app, appNodes)
 
 	require.NoError(t, err)
 	assert.Equal(t, []v1alpha1.HostInfo{{
@@ -3607,6 +3845,15 @@ func TestGetAppHosts(t *testing.T) {
 		},
 		Labels: map[string]string{"label1": "value1", "label2": "value2"},
 	}}, hosts)
+
+	// A host read from a named destination records it. Node names are unique only within a cluster,
+	// so once every destination's hosts are merged this is the only thing telling two identically
+	// named nodes apart.
+	named, err := ctrl.getAppHosts(&v1alpha1.Cluster{Server: "test", Name: "test"}, "second", app, appNodes)
+	require.NoError(t, err)
+	require.Len(t, named, 1)
+	assert.Equal(t, "second", named[0].Destination)
+	assert.Equal(t, "minikube", named[0].Name, "the destination is recorded alongside the node name, not instead of it")
 }
 
 func TestMetricsExpiration(t *testing.T) {
@@ -4462,4 +4709,54 @@ func TestHandleRefreshAnnotation(t *testing.T) {
 			{Op: "remove", Path: refreshPath},
 		}, capturedPatches[0], "patch without timestamp should only remove the refresh annotation, no test op")
 	})
+}
+
+// The tree must be assembled per destination, with every node attributed to the destination whose
+// cluster it was read from.
+func TestGetResourceTreeTagsNodesByDestination(t *testing.T) {
+	app := newFakeApp()
+	proj := defaultProj.DeepCopy()
+
+	managedDeploy := v1alpha1.ResourceNode{
+		ResourceRef: v1alpha1.ResourceRef{Group: "apps", Kind: "Deployment", Namespace: "default", Name: "nginx-deployment", Version: "v1"},
+	}
+
+	ctrl := newFakeController(t.Context(), &fakeData{
+		apps: []runtime.Object{app, proj},
+		namespacedResources: map[kube.ResourceKey]namespacedResource{
+			kube.NewResourceKey("apps", "Deployment", "default", "nginx-deployment"): {ResourceNode: managedDeploy},
+		},
+	}, nil)
+
+	cluster := &v1alpha1.Cluster{Server: "https://localhost:6443", Name: "fake-cluster"}
+	dests := map[string]argo.ResolvedDestination{
+		argo.PrimaryDestinationName: {Name: argo.PrimaryDestinationName, Cluster: cluster},
+		"second":                    {Name: "second", Cluster: cluster},
+	}
+
+	tree, err := ctrl.getResourceTree(dests, []string{argo.PrimaryDestinationName, "second"}, app, []*v1alpha1.ResourceDiff{
+		{
+			Namespace: "default", Name: "nginx-deployment", Kind: "Deployment", Group: "apps",
+			LiveState: "null", TargetState: test.DeploymentManifest,
+			Destination: argo.PrimaryDestinationName,
+		},
+		{
+			Namespace: "default", Name: "other-deployment", Kind: "Deployment", Group: "apps",
+			LiveState: "null", TargetState: test.DeploymentManifest,
+			Destination: "second",
+		},
+	})
+	require.NoError(t, err)
+
+	byName := map[string]v1alpha1.ResourceNode{}
+	for _, n := range tree.Nodes {
+		byName[n.Name] = n
+	}
+	require.Contains(t, byName, "nginx-deployment")
+	require.Contains(t, byName, "other-deployment")
+
+	// Each node carries the destination its ResourceDiff was grouped under, which is what keeps
+	// same-named resources in different clusters distinguishable.
+	assert.Equal(t, argo.PrimaryDestinationName, byName["nginx-deployment"].Destination)
+	assert.Equal(t, "second", byName["other-deployment"].Destination)
 }

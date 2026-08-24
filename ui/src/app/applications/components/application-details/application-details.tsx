@@ -781,7 +781,10 @@ Are you sure you want to disable auto-sync and rollback application '${props.mat
                                         ...commonProps,
                                         onNodeClick: (fullName: string) => {
                                             const parts = fullName.split('/');
-                                            const [group, kind, namespace, name] = parts;
+                                            const [group, kind, namespace] = parts;
+                                            // The name segment carries the destination when the resource is not in the
+                                            // primary one, so it has to be split off before comparing against a name.
+                                            const {name} = AppUtils.parseNodeName(parts[3] || '');
                                             if (group === 'argoproj.io' && kind === 'ApplicationSet' && namespace && name) {
                                                 // Only navigate to AppSet page if this AppSet owns the current Application.
                                                 // If the AppSet is a child resource managed by this Application, open ResourceDetails instead.
@@ -809,7 +812,8 @@ Are you sure you want to disable auto-sync and rollback application '${props.mat
                                         onNodeClick: (fullName: string) => {
                                             // For ApplicationSets, navigate to Application details if clicking an Application node
                                             const parts = fullName.split('/');
-                                            const [group, kind, namespace, name] = parts;
+                                            const [group, kind, namespace] = parts;
+                                            const {name} = AppUtils.parseNodeName(parts[3] || '');
                                             if (group === 'argoproj.io' && kind === 'Application' && namespace && name) {
                                                 appContext.navigation.goto(`/applications/${namespace}/${name}`);
                                             } else {
