@@ -1,6 +1,7 @@
 package appstate
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -85,4 +86,30 @@ func TestAddCacheFlagsToCmd(t *testing.T) {
 	cache, err := AddCacheFlagsToCmd(&cobra.Command{})()
 	require.NoError(t, err)
 	assert.Equal(t, 1*time.Hour, cache.appStateCacheExpiration)
+}
+
+func TestCache_OnAnyAppResourcesTreeChanged(t *testing.T) {
+	t.Parallel()
+	cache := newFixtures().Cache
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	received := make(chan string, 10)
+	go func() {
+		_ = cache.OnAnyAppResourcesTreeChanged(ctx, func(appName string) error {
+			received <- appName
+			return nil
+		})
+	}()
+
+	// SetAppResourcesTree publishes the update notification; keep publishing until the subscription is registered.
+	require.Eventually(t, func() bool {
+		require.NoError(t, cache.SetAppResourcesTree("argocd_guestbook", &ApplicationTree{}))
+		select {
+		case appName := <-received:
+			return appName == "argocd_guestbook"
+		case <-time.After(10 * time.Millisecond):
+			return false
+		}
+	}, 5*time.Second, 10*time.Millisecond)
 }

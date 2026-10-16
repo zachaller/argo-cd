@@ -12,6 +12,9 @@ var (
 	CacheLockedValue  = "locked"
 )
 
+// ErrPatternSubscriptionUnsupported is returned when the underlying cache client cannot subscribe to key patterns.
+var ErrPatternSubscriptionUnsupported = errors.New("cache: pattern subscriptions are not supported by this cache client")
+
 type Item struct {
 	Key             string
 	Object          any
@@ -34,4 +37,12 @@ type CacheClient interface {
 	Delete(key string) error
 	OnUpdated(ctx context.Context, key string, callback func() error) error
 	NotifyUpdated(key string) error
+}
+
+// PatternSubscriber is implemented by cache clients which can deliver update notifications for every key matching a
+// glob pattern (as understood by Redis PSUBSCRIBE), rather than for a single key.
+type PatternSubscriber interface {
+	// OnUpdatedPattern blocks until ctx is done, invoking callback with the full key of every notification whose key
+	// matches pattern.
+	OnUpdatedPattern(ctx context.Context, pattern string, callback func(key string) error) error
 }

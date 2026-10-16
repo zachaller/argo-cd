@@ -1,0 +1,30 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: argocd-aggregated-apiserver
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/component: aggregated-apiserver
+  name: argocd-aggregated-apiserver
+rules:
+# Delegated authentication: the client CA and front proxy configuration published by kube-apiserver in
+# kube-system/extension-apiserver-authentication.
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  resourceNames:
+  - extension-apiserver-authentication
+  verbs:
+  - get
+  - list
+  - watch
+# Applications in additional namespaces (application.namespaces in argocd-cmd-params-cm).
+- apiGroups:
+  - argoproj.io
+  resources:
+  - applications
+  verbs:
+  - get
+  - list
+  - watch

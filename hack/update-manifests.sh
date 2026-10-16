@@ -111,6 +111,9 @@ cd "${SRCROOT}/manifests/core-install" && $KUSTOMIZE edit set image "${SOURCE_IM
 # If/when commit-server is added to the base, this can be removed.
 cd "${SRCROOT}/manifests/base/commit-server" && $KUSTOMIZE edit set image "${SOURCE_IMAGE_NAME}=${FULL_IMAGE_NAME}:${IMAGE_TAG}"
 
+# The aggregated API server is an opt-in component outside the base.
+cd "${SRCROOT}/manifests/aggregated-api" && $KUSTOMIZE edit set image "${SOURCE_IMAGE_NAME}=${FULL_IMAGE_NAME}:${IMAGE_TAG}"
+
 echo "${AUTOGENMSG}" > "${SRCROOT}/manifests/install.yaml"
 $KUSTOMIZE build "${SRCROOT}/manifests/cluster-install" >> "${SRCROOT}/manifests/install.yaml"
 

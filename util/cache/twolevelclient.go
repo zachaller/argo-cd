@@ -71,6 +71,14 @@ func (c *twoLevelClient) OnUpdated(ctx context.Context, key string, callback fun
 	return c.externalCache.OnUpdated(ctx, key, callback)
 }
 
+func (c *twoLevelClient) OnUpdatedPattern(ctx context.Context, pattern string, callback func(key string) error) error {
+	subscriber, ok := c.externalCache.(PatternSubscriber)
+	if !ok {
+		return ErrPatternSubscriptionUnsupported
+	}
+	return subscriber.OnUpdatedPattern(ctx, pattern, callback)
+}
+
 func (c *twoLevelClient) NotifyUpdated(key string) error {
 	return c.externalCache.NotifyUpdated(key)
 }

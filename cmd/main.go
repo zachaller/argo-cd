@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/klog/v2"
 
+	aggregatedapiserver "github.com/argoproj/argo-cd/v3/cmd/argocd-aggregated-apiserver/commands"
 	appcontroller "github.com/argoproj/argo-cd/v3/cmd/argocd-application-controller/commands"
 	applicationset "github.com/argoproj/argo-cd/v3/cmd/argocd-applicationset-controller/commands"
 	cmpserver "github.com/argoproj/argo-cd/v3/cmd/argocd-cmp-server/commands"
@@ -70,6 +71,8 @@ func main() {
 		isArgocdCLI = true
 	case common.CommandApplicationSetController:
 		command = applicationset.NewCommand()
+	case common.CommandAggregatedAPIServer:
+		command = aggregatedapiserver.NewCommand()
 	case common.CommandK8sAuth:
 		command = k8sauth.NewCommand()
 		isArgocdCLI = true

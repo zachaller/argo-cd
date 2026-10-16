@@ -3,6 +3,7 @@ package cache
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"io"
 	"strconv"
 	"testing"
@@ -218,4 +219,40 @@ func TestRedisMetrics(t *testing.T) {
 	err = o.(prometheus.Metric).Write(metric)
 	require.NoError(t, err)
 	assert.Equal(t, 4, int(metric.Histogram.GetSampleCount()))
+}
+
+func TestRedisOnUpdatedPattern(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	defer mr.Close()
+
+	client := NewRedisCache(redis.NewClient(&redis.Options{Addr: mr.Addr()}), 60*time.Second, RedisCompressionNone)
+	subscriber, ok := client.(PatternSubscriber)
+	require.True(t, ok)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	received := make(chan string, 10)
+	done := make(chan error, 1)
+	go func() {
+		done <- subscriber.OnUpdatedPattern(ctx, "app|*", func(key string) error {
+			received <- key
+			return nil
+		})
+	}()
+
+	// Wait for the subscription to be registered before publishing.
+	require.Eventually(t, func() bool { return mr.PubSubNumPat() > 0 }, 5*time.Second, 10*time.Millisecond)
+	require.NoError(t, client.NotifyUpdated("other|a"))
+	require.NoError(t, client.NotifyUpdated("app|b"))
+
+	select {
+	case key := <-received:
+		assert.Equal(t, "app|b", key)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for notification")
+	}
+	cancel()
+	require.NoError(t, <-done)
+	assert.Empty(t, received)
 }

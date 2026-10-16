@@ -59,6 +59,12 @@ func (c *Cache) OnAppResourcesTreeChanged(ctx context.Context, appName string, c
 	return c.cache.OnAppResourcesTreeChanged(ctx, appName, callback)
 }
 
+// OnAnyAppResourcesTreeChanged invokes callback with the application instance name every time the resources tree of
+// any application changes.
+func (c *Cache) OnAnyAppResourcesTreeChanged(ctx context.Context, callback func(appInstanceName string) error) error {
+	return c.cache.OnAnyAppResourcesTreeChanged(ctx, callback)
+}
+
 func (c *Cache) GetAppManagedResources(appName string, res *[]*appv1.ResourceDiff) error {
 	return c.cache.GetAppManagedResources(appName, res)
 }

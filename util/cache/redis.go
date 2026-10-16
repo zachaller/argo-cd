@@ -178,6 +178,26 @@ func (r *redisCache) OnUpdated(ctx context.Context, key string, callback func() 
 	}
 }
 
+func (r *redisCache) OnUpdatedPattern(ctx context.Context, pattern string, callback func(key string) error) error {
+	pubsub := r.client.PSubscribe(ctx, pattern)
+	defer utilio.Close(pubsub)
+
+	ch := pubsub.Channel()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case msg, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			if err := callback(msg.Channel); err != nil {
+				return err
+			}
+		}
+	}
+}
+
 func (r *redisCache) NotifyUpdated(key string) error {
 	return r.client.Publish(context.TODO(), key, "").Err()
 }

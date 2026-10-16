@@ -26,6 +26,7 @@ to indicate their stability and maturity. These are the statuses of non-stable f
 | [Service Account Impersonation][10]       | v2.13.0    | Beta   |
 | [Source Hydrator][11]                     | v2.14.0    | Beta   |
 | [ApplicationSet Web UI][12]               | v3.5.0     | Alpha  |
+| [Aggregated API][13]                      | v3.7.0     | Alpha  |
 
 ## Unstable Configurations
 
@@ -79,3 +80,4 @@ to indicate their stability and maturity. These are the statuses of non-stable f
 [10]: app-sync-using-impersonation.md
 [11]: ../user-guide/source-hydrator.md
 [12]: ../user-guide/application-set-ui.md
+[13]: aggregated-api.md

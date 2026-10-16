@@ -1,0 +1,34 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: argocd-aggregated-apiserver
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/component: aggregated-apiserver
+  name: argocd-aggregated-apiserver
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: argocd-aggregated-apiserver
+subjects:
+- kind: ServiceAccount
+  name: argocd-aggregated-apiserver
+  namespace: argocd
+---
+# Delegated authentication and authorization: TokenReviews and SubjectAccessReviews.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: argocd-aggregated-apiserver
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/component: aggregated-apiserver
+  name: argocd-aggregated-apiserver-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+- kind: ServiceAccount
+  name: argocd-aggregated-apiserver
+  namespace: argocd

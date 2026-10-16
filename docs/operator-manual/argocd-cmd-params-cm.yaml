@@ -477,3 +477,17 @@ data:
   notificationscontroller.repo.server.client.cert.path: ""
   # Path to the client certificate key file for mTLS connections to repo server
   notificationscontroller.repo.server.client.cert.key.path: ""
+
+  ## Argo CD Aggregated API Server Properties (alpha, see aggregated-api.md)
+  # Set the logging format. One of: json|text (default "json")
+  aggregatedapiserver.log.format: "json"
+  # Set the logging level. One of: debug|info|warn|error (default "info")
+  aggregatedapiserver.log.level: "info"
+  # Prefix added to Kubernetes user and group names before they are evaluated against the Argo CD RBAC policy (default "k8s:")
+  aggregatedapiserver.rbac.subject.prefix: "k8s:"
+  # Interval between watch bookmarks, for clients requesting them (default "1m")
+  aggregatedapiserver.watch.bookmark.interval: "1m"
+  # Number of events buffered per watch before a slow client is disconnected (default "100")
+  aggregatedapiserver.watch.buffer.size: "100"
+  # Interval at which watched projections are recomputed, to catch lost change notifications (default "3m")
+  aggregatedapiserver.watch.resync.period: "3m"

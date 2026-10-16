@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra/doc"
 
+	aggregatedapiserver "github.com/argoproj/argo-cd/v3/cmd/argocd-aggregated-apiserver/commands"
 	controller "github.com/argoproj/argo-cd/v3/cmd/argocd-application-controller/commands"
 	argocdappsetcontroller "github.com/argoproj/argo-cd/v3/cmd/argocd-applicationset-controller/commands"
 	argocddex "github.com/argoproj/argo-cd/v3/cmd/argocd-dex/commands"
@@ -57,6 +58,11 @@ func main() {
 	}
 
 	err = doc.GenMarkdownTreeCustom(argocdappsetcontroller.NewCommand(), "./docs/operator-manual/server-commands", headerPrepender, identity)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = doc.GenMarkdownTreeCustom(aggregatedapiserver.NewCommand(), "./docs/operator-manual/server-commands", headerPrepender, identity)
 	if err != nil {
 		log.Fatal(err)
 	}

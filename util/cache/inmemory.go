@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/gob"
 	"fmt"
+	"path"
+	"sync"
 	"time"
 
 	gocache "github.com/patrickmn/go-cache"
@@ -21,10 +23,21 @@ func init() {
 }
 
 // compile-time validation of adherence of the CacheClient contract
-var _ CacheClient = &InMemoryCache{}
+var (
+	_ CacheClient       = &InMemoryCache{}
+	_ PatternSubscriber = &InMemoryCache{}
+)
 
 type InMemoryCache struct {
 	memCache *gocache.Cache
+
+	subscribersLock sync.RWMutex
+	subscribers     map[*patternSubscription]struct{}
+}
+
+type patternSubscription struct {
+	pattern string
+	keys    chan string
 }
 
 func (i *InMemoryCache) Set(item *Item) error {
@@ -93,7 +106,45 @@ func (i *InMemoryCache) OnUpdated(_ context.Context, _ string, _ func() error) e
 	return nil
 }
 
-func (i *InMemoryCache) NotifyUpdated(_ string) error {
+// OnUpdatedPattern delivers in-process notifications published with NotifyUpdated for keys matching pattern.
+func (i *InMemoryCache) OnUpdatedPattern(ctx context.Context, pattern string, callback func(key string) error) error {
+	sub := &patternSubscription{pattern: pattern, keys: make(chan string, 100)}
+	i.subscribersLock.Lock()
+	if i.subscribers == nil {
+		i.subscribers = map[*patternSubscription]struct{}{}
+	}
+	i.subscribers[sub] = struct{}{}
+	i.subscribersLock.Unlock()
+	defer func() {
+		i.subscribersLock.Lock()
+		delete(i.subscribers, sub)
+		i.subscribersLock.Unlock()
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case key := <-sub.keys:
+			if err := callback(key); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (i *InMemoryCache) NotifyUpdated(key string) error {
+	i.subscribersLock.RLock()
+	defer i.subscribersLock.RUnlock()
+	for sub := range i.subscribers {
+		if matched, _ := path.Match(sub.pattern, key); matched {
+			select {
+			case sub.keys <- key:
+			default:
+				// Like Redis pub/sub, notifications are best effort: drop when the subscriber is not keeping up.
+			}
+		}
+	}
 	return nil
 }
 

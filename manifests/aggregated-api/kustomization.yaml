@@ -1,0 +1,51 @@
+# Opt-in component serving the read-only views.argoproj.io API (ApplicationTree, ApplicationDiff) through the
+# Kubernetes API aggregation layer. See docs/operator-manual/aggregated-api.md.
+#
+# Usage, in a kustomization that installs Argo CD in the argocd namespace:
+#
+#   components:
+#   - https://github.com/argoproj/argo-cd/manifests/aggregated-api?ref=<version>
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+images:
+- name: quay.io/argoproj/argocd
+  newName: quay.io/argoproj/argocd
+  newTag: latest
+
+resources:
+- argocd-aggregated-apiserver-sa.yaml
+- argocd-aggregated-apiserver-role.yaml
+- argocd-aggregated-apiserver-rolebinding.yaml
+- argocd-aggregated-apiserver-clusterrole.yaml
+- argocd-aggregated-apiserver-clusterrolebinding.yaml
+- argocd-aggregated-apiserver-deployment.yaml
+- argocd-aggregated-apiserver-pdb.yaml
+- argocd-aggregated-apiserver-service.yaml
+- argocd-aggregated-apiserver-network-policy.yaml
+- argocd-aggregated-apiserver-apiservice.yaml
+- argocd-views-reader-clusterrole.yaml
+
+# Allow the aggregated API server to reach Redis. Patches whose target does not exist (e.g. the HA proxy policy in a
+# non-HA installation) are ignored.
+patches:
+- target:
+    kind: NetworkPolicy
+    name: argocd-redis-network-policy
+  patch: |-
+    - op: add
+      path: /spec/ingress/0/from/-
+      value:
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: argocd-aggregated-apiserver
+- target:
+    kind: NetworkPolicy
+    name: argocd-redis-ha-proxy-network-policy
+  patch: |-
+    - op: add
+      path: /spec/ingress/0/from/-
+      value:
+        podSelector:
+          matchLabels:
+            app.kubernetes.io/name: argocd-aggregated-apiserver

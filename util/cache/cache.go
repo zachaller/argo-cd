@@ -386,6 +386,19 @@ func (c *Cache) OnUpdated(ctx context.Context, key string, callback func() error
 	return c.client.OnUpdated(ctx, c.generateFullKey(key), callback)
 }
 
+// OnUpdatedPattern invokes callback with the (unversioned) key of every update notification whose key matches the
+// given glob pattern. It returns ErrPatternSubscriptionUnsupported if the cache client cannot subscribe to patterns.
+func (c *Cache) OnUpdatedPattern(ctx context.Context, keyPattern string, callback func(key string) error) error {
+	subscriber, ok := c.client.(PatternSubscriber)
+	if !ok {
+		return ErrPatternSubscriptionUnsupported
+	}
+	suffix := "|" + common.CacheVersion
+	return subscriber.OnUpdatedPattern(ctx, c.generateFullKey(keyPattern), func(key string) error {
+		return callback(strings.TrimSuffix(key, suffix))
+	})
+}
+
 func (c *Cache) NotifyUpdated(key string) error {
 	return c.client.NotifyUpdated(c.generateFullKey(key))
 }

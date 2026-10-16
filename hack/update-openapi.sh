@@ -25,6 +25,16 @@ openapi-gen \
   --output-dir "${GOPATH}/src" \
   "$@"
 
+openapi-gen \
+  --go-header-file "${PROJECT_ROOT}/hack/custom-boilerplate.go.txt" \
+  --output-pkg github.com/argoproj/argo-cd/v3/pkg/apis/views/${VERSION} \
+  --output-dir "${PROJECT_ROOT}/pkg/apis/views/${VERSION}" \
+  --output-file openapi_generated.go \
+  --output-model-name-file zz_generated.model_name.go \
+  --readonly-pkg github.com/argoproj/argo-cd/v3/pkg/apis/application/${VERSION} \
+  --report-filename - \
+  github.com/argoproj/argo-cd/v3/pkg/apis/views/${VERSION}
+
 [ -L "${GOPATH_PROJECT_ROOT}" ] && rm -rf "${GOPATH_PROJECT_ROOT}"
 [ -L ./v3 ] && rm -rf v3
 

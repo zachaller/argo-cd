@@ -11,6 +11,8 @@ func TestIsExcludedResource(t *testing.T) {
 	settings := &ResourcesFilter{}
 	assert.True(t, settings.IsExcludedResource("events.k8s.io", "", ""))
 	assert.True(t, settings.IsExcludedResource("metrics.k8s.io", "", ""))
+	assert.True(t, settings.IsExcludedResource("views.argoproj.io", "ApplicationTree", ""))
+	assert.True(t, settings.IsExcludedResource("views.argoproj.io", "ApplicationDiff", ""))
 	assert.False(t, settings.IsExcludedResource("rubbish.io", "", ""))
 }
 

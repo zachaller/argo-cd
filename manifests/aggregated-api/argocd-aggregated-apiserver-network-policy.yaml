@@ -1,0 +1,19 @@
+# kube-apiserver usually runs outside of the pod network, so ingress to the serving port is not restricted.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/name: argocd-aggregated-apiserver
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/component: aggregated-apiserver
+  name: argocd-aggregated-apiserver-network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-aggregated-apiserver
+  policyTypes:
+  - Ingress
+  ingress:
+  - ports:
+    - protocol: TCP
+      port: 8443

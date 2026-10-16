@@ -8,6 +8,9 @@ import "strings"
 // reasons, reducing connections and load to the K8s API servers of managed clusters.
 var coreExcludedResources = []FilteredResource{
 	{APIGroups: []string{"events.k8s.io", "metrics.k8s.io"}},
+	// views.argoproj.io is served by argocd-aggregated-apiserver and contains read-only projections of Argo CD's own
+	// application state. Watching it would make every reconciliation trigger another one.
+	{APIGroups: []string{"views.argoproj.io"}},
 	{APIGroups: []string{""}, Kinds: []string{"Event"}},
 	{APIGroups: []string{"coordination.k8s.io"}, Kinds: []string{"Lease"}},
 }

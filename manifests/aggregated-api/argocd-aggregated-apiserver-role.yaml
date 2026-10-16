@@ -1,0 +1,27 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/name: argocd-aggregated-apiserver
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/component: aggregated-apiserver
+  name: argocd-aggregated-apiserver
+rules:
+# argocd-cm (tracking label) and argocd-rbac-cm (RBAC policy)
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - argoproj.io
+  resources:
+  - applications
+  - appprojects
+  verbs:
+  - get
+  - list
+  - watch

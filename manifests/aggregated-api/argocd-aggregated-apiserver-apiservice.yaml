@@ -1,0 +1,20 @@
+# By default the aggregated API server uses a self-signed certificate, which kube-apiserver does not verify (like
+# metrics-server). See docs/operator-manual/aggregated-api.md to serve a certificate verified with caBundle instead.
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  labels:
+    app.kubernetes.io/name: argocd-aggregated-apiserver
+    app.kubernetes.io/part-of: argocd
+    app.kubernetes.io/component: aggregated-apiserver
+  name: v1alpha1.views.argoproj.io
+spec:
+  group: views.argoproj.io
+  version: v1alpha1
+  groupPriorityMinimum: 1000
+  versionPriority: 15
+  insecureSkipTLSVerify: true
+  service:
+    name: argocd-aggregated-apiserver
+    namespace: argocd
+    port: 443

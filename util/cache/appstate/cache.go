@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -100,6 +101,15 @@ func (c *Cache) GetAppResourcesTree(appName string, res *appv1.ApplicationTree) 
 
 func (c *Cache) OnAppResourcesTreeChanged(ctx context.Context, appName string, callback func() error) error {
 	return c.Cache.OnUpdated(ctx, appManagedResourcesKey(appName), callback)
+}
+
+// OnAnyAppResourcesTreeChanged invokes callback with the application instance name (see Application.InstanceName)
+// every time the controller updates the resources tree or managed resources of any application.
+func (c *Cache) OnAnyAppResourcesTreeChanged(ctx context.Context, callback func(appInstanceName string) error) error {
+	prefix := appManagedResourcesKey("")
+	return c.Cache.OnUpdatedPattern(ctx, prefix+"*", func(key string) error {
+		return callback(strings.TrimPrefix(key, prefix))
+	})
 }
 
 func (c *Cache) SetAppResourcesTree(appName string, resourcesTree *appv1.ApplicationTree) error {
