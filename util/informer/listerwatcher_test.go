@@ -296,6 +296,21 @@ func TestListerWatcher_Watch(t *testing.T) {
 		assert.Equal(t, watch.Error, next(t, w).Type)
 	})
 
+	// An object without metadata has no namespace to match. It is forwarded, so that the reflector
+	// reports the unexpected object instead of the filter hiding it.
+	t.Run("passes objects without metadata", func(t *testing.T) {
+		incoming, w := newWatch(t, func(_ metav1.Object) bool { return false })
+		defer w.Stop()
+
+		notAnObject := &metav1.Status{Status: metav1.StatusFailure}
+		for _, eventType := range []watch.EventType{watch.Added, watch.Modified, watch.Deleted} {
+			incoming.Action(eventType, notAnObject)
+			event := next(t, w)
+			assert.Equal(t, eventType, event.Type)
+			assert.Same(t, notAnObject, event.Object)
+		}
+	})
+
 	t.Run("returns the watch as is without a filter", func(t *testing.T) {
 		incoming, w := newWatch(t, nil)
 		defer w.Stop()
