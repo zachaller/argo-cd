@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
@@ -319,4 +320,63 @@ func TestResyncAppsAfterShardChange_InvalidatesLocalCache(t *testing.T) {
 	require.Len(t, got.Nodes, 1)
 	assert.Equal(t, "pod-1", got.Nodes[0].Name)
 	assert.Contains(t, assertEnqueued(t, ctrl.appRefreshQueue), "my-app")
+}
+
+// Applications from namespaces that are not enabled must stay out of the informer cache, whether they
+// exist when the controller starts or are created later.
+func TestNewApplicationInformerAndLister_CachesOnlyEnabledNamespaces(t *testing.T) {
+	app := func(namespace, name string) *v1alpha1.Application {
+		a := newFakeApp()
+		a.Namespace = namespace
+		a.Name = name
+		return a
+	}
+	ctrl := newFakeController(t.Context(), &fakeData{
+		apps: []runtime.Object{
+			app(test.FakeArgoCDNamespace, "control-plane"),
+			app("team-a", "enabled"),
+			app("team-b", "not-enabled"),
+			&defaultProj,
+		},
+		applicationNamespaces: []string{"team-a"},
+	}, nil)
+
+	// The fake controller stops its informers once they have synced, so run a fresh one.
+	informer, lister := ctrl.newApplicationInformerAndLister()
+	go informer.Run(t.Context().Done())
+	require.True(t, cache.WaitForCacheSync(t.Context().Done(), informer.HasSynced))
+
+	controlPlaneKey := test.FakeArgoCDNamespace + "/control-plane"
+	assert.ElementsMatch(t, []string{controlPlaneKey, "team-a/enabled"}, informer.GetStore().ListKeys())
+
+	// The application from the namespace that is not enabled is created first, so it has been through
+	// the informer by the time the enabled one shows up.
+	appClient := ctrl.applicationClientset.ArgoprojV1alpha1()
+	_, err := appClient.Applications("team-b").Create(t.Context(), app("team-b", "not-enabled-later"), metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = appClient.Applications("team-a").Create(t.Context(), app("team-a", "enabled-later"), metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Contains(c, informer.GetStore().ListKeys(), "team-a/enabled-later")
+	}, 5*time.Second, 10*time.Millisecond)
+	assert.ElementsMatch(t, []string{controlPlaneKey, "team-a/enabled", "team-a/enabled-later"}, informer.GetStore().ListKeys())
+
+	apps, err := lister.List(labels.Everything())
+	require.NoError(t, err)
+	assert.Len(t, apps, 3)
+}
+
+// Without application namespaces the controller only watches its own namespace.
+func TestNewApplicationInformerAndLister_WatchesOwnNamespaceByDefault(t *testing.T) {
+	inControlPlane := newFakeApp()
+	elsewhere := newFakeApp()
+	elsewhere.Namespace = "team-a"
+	ctrl := newFakeController(t.Context(), &fakeData{apps: []runtime.Object{inControlPlane, elsewhere, &defaultProj}}, nil)
+
+	informer, _ := ctrl.newApplicationInformerAndLister()
+	go informer.Run(t.Context().Done())
+	require.True(t, cache.WaitForCacheSync(t.Context().Done(), informer.HasSynced))
+
+	assert.Equal(t, []string{test.FakeArgoCDNamespace + "/" + inControlPlane.Name}, informer.GetStore().ListKeys())
 }

@@ -72,6 +72,7 @@ import (
 	"github.com/argoproj/argo-cd/v3/util/errors"
 	"github.com/argoproj/argo-cd/v3/util/glob"
 	"github.com/argoproj/argo-cd/v3/util/helm"
+	informerutil "github.com/argoproj/argo-cd/v3/util/informer"
 	logutils "github.com/argoproj/argo-cd/v3/util/log"
 	settings_util "github.com/argoproj/argo-cd/v3/util/settings"
 	traceutil "github.com/argoproj/argo-cd/v3/util/trace"
@@ -103,10 +104,6 @@ const (
 	// Skip comparison and only refresh application resources tree
 	ComparisonWithNothing CompareWith = 0
 )
-
-func init() {
-	settings_util.ConfigureGoClientFeatures()
-}
 
 func (a CompareWith) Max(b CompareWith) CompareWith {
 	return CompareWith(math.Max(float64(a), float64(b)))
@@ -3208,7 +3205,11 @@ func (ctrl *ApplicationController) selfHealRemainingBackoff(app *appv1.Applicati
 // isAppNamespaceAllowed returns whether the application is allowed in the
 // namespace it's residing in.
 func (ctrl *ApplicationController) isAppNamespaceAllowed(app *appv1.Application) bool {
-	return app.Namespace == ctrl.namespace || glob.MatchStringInList(ctrl.applicationNamespaces, app.Namespace, glob.REGEXP)
+	return ctrl.isNamespaceAllowed(app.Namespace)
+}
+
+func (ctrl *ApplicationController) isNamespaceAllowed(namespace string) bool {
+	return namespace == ctrl.namespace || glob.MatchStringInList(ctrl.applicationNamespaces, namespace, glob.REGEXP)
 }
 
 func (ctrl *ApplicationController) canProcessApp(obj any) bool {
@@ -3276,28 +3277,23 @@ func (ctrl *ApplicationController) newApplicationInformerAndLister() (cache.Shar
 	if ctrl.statusHardRefreshTimeout.Seconds() != 0 && (ctrl.statusHardRefreshTimeout < ctrl.statusRefreshTimeout) {
 		refreshTimeout = ctrl.statusHardRefreshTimeout
 	}
+	// A cluster-wide watch also returns apps from namespaces the user did not enable. Keep those
+	// out of the cache.
+	var keep informerutil.KeepFunc
+	if watchNamespace == "" {
+		keep = func(obj metav1.Object) bool {
+			return ctrl.isNamespaceAllowed(obj.GetNamespace())
+		}
+	}
 	informer := cache.NewSharedIndexInformer(
-		&cache.ListWatch{
+		informerutil.NewListerWatcher(&cache.ListWatch{
 			ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (apiruntime.Object, error) {
-				// We are only interested in apps that exist in namespaces the
-				// user wants to be enabled.
-				appList, err := ctrl.applicationClientset.ArgoprojV1alpha1().Applications(watchNamespace).List(ctx, options)
-				if err != nil {
-					return nil, err
-				}
-				newItems := []appv1.Application{}
-				for _, app := range appList.Items {
-					if ctrl.isAppNamespaceAllowed(&app) {
-						newItems = append(newItems, app)
-					}
-				}
-				appList.Items = newItems
-				return appList, nil
+				return ctrl.applicationClientset.ArgoprojV1alpha1().Applications(watchNamespace).List(ctx, options)
 			},
 			WatchFuncWithContext: func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
 				return ctrl.applicationClientset.ArgoprojV1alpha1().Applications(watchNamespace).Watch(ctx, options)
 			},
-		},
+		}, ctrl.applicationClientset, keep),
 		&appv1.Application{},
 		refreshTimeout,
 		cache.Indexers{

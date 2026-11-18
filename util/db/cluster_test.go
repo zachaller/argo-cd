@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/util/watchlist"
 
 	"github.com/argoproj/argo-cd/v3/common"
 	"github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
@@ -273,6 +274,12 @@ type watchNotifyingClientSet struct {
 
 func newWatchNotifyingClientSet(clientSet kubernetes.Interface) *watchNotifyingClientSet {
 	return &watchNotifyingClientSet{Interface: clientSet, watchStarted: make(chan struct{})}
+}
+
+// IsWatchListSemanticsUnSupported passes on what the wrapped clientset says. Embedding the interface
+// hides the fake's own answer, and a reflector would then wait for a bookmark the fake never sends.
+func (c *watchNotifyingClientSet) IsWatchListSemanticsUnSupported() bool {
+	return watchlist.DoesClientNotSupportWatchListSemantics(c.Interface)
 }
 
 func (c *watchNotifyingClientSet) CoreV1() corev1client.CoreV1Interface {

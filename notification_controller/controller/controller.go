@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/argoproj/argo-cd/v3/util/glob"
+	informerutil "github.com/argoproj/argo-cd/v3/util/informer"
 
 	"github.com/argoproj/argo-cd/v3/util/notification/k8s"
 
@@ -76,15 +77,22 @@ func NewController(
 	selfServiceNotificationEnabled bool,
 ) *notificationController {
 	var appClient dynamic.ResourceInterface
+	var keepApp informerutil.KeepFunc
 
 	namespaceableAppClient := client.Resource(applications)
 	appClient = namespaceableAppClient
 
 	if len(applicationNamespaces) == 0 {
 		appClient = namespaceableAppClient.Namespace(namespace)
+	} else {
+		// A cluster-wide watch also returns apps from namespaces the user did not enable. Keep
+		// those out of the cache.
+		keepApp = func(obj metav1.Object) bool {
+			return namespace == obj.GetNamespace() || glob.MatchStringInList(applicationNamespaces, obj.GetNamespace(), glob.REGEXP)
+		}
 	}
-	appInformer := newInformer(appClient, namespace, applicationNamespaces, appLabelSelector)
-	appProjInformer := newInformer(newAppProjClient(client, namespace), namespace, []string{namespace}, "")
+	appInformer := newInformer(client, appClient, keepApp, appLabelSelector)
+	appProjInformer := newInformer(client, newAppProjClient(client, namespace), nil, "")
 	var notificationConfigNamespace string
 	if selfServiceNotificationEnabled {
 		notificationConfigNamespace = metav1.NamespaceAll
@@ -153,31 +161,24 @@ func (c *notificationController) alterDestinations(obj metav1.Object, destinatio
 	return destinations
 }
 
-func newInformer(resClient dynamic.ResourceInterface, controllerNamespace string, applicationNamespaces []string, selector string) cache.SharedIndexInformer {
+// newInformer returns an informer on resClient, a resource client of client. A non-nil keep decides
+// which objects enter the cache.
+func newInformer(client dynamic.Interface, resClient dynamic.ResourceInterface, keep informerutil.KeepFunc, selector string) cache.SharedIndexInformer {
 	informer := cache.NewSharedIndexInformer(
-		&cache.ListWatch{
+		informerutil.NewListerWatcher(&cache.ListWatch{
 			ListWithContextFunc: func(ctx context.Context, options metav1.ListOptions) (runtime.Object, error) {
-				// We are only interested in apps that exist in namespaces the
-				// user wants to be enabled.
 				options.LabelSelector = selector
 				appList, err := resClient.List(ctx, options)
 				if err != nil {
 					return nil, fmt.Errorf("failed to list applications: %w", err)
 				}
-				newItems := []unstructured.Unstructured{}
-				for _, res := range appList.Items {
-					if controllerNamespace == res.GetNamespace() || glob.MatchStringInList(applicationNamespaces, res.GetNamespace(), glob.REGEXP) {
-						newItems = append(newItems, res)
-					}
-				}
-				appList.Items = newItems
 				return appList, nil
 			},
 			WatchFuncWithContext: func(ctx context.Context, options metav1.ListOptions) (watch.Interface, error) {
 				options.LabelSelector = selector
 				return resClient.Watch(ctx, options)
 			},
-		},
+		}, client, keep),
 		&unstructured.Unstructured{},
 		resyncPeriod,
 		cache.Indexers{

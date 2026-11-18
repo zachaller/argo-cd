@@ -9,6 +9,7 @@ import (
 	"github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"
@@ -283,4 +284,55 @@ func TestCheckAppNotInAdditionalNamespaces(t *testing.T) {
 	// app is not in the namespace as controller's namespace, and it is not in any of the applicationNamespaces
 	app.SetNamespace("namespace3")
 	assert.True(t, checkAppNotInAdditionalNamespaces(app, "", applicationNamespaces))
+}
+
+// Applications from namespaces that are not enabled must stay out of the informer cache, whether they
+// exist when the controller starts or are created later.
+func TestNewController_AppInformerCachesOnlyEnabledNamespaces(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.SchemeBuilder.AddToScheme(scheme))
+	app := func(namespace, name string) *unstructured.Unstructured {
+		obj := &unstructured.Unstructured{}
+		obj.SetAPIVersion("argoproj.io/v1alpha1")
+		obj.SetKind("Application")
+		obj.SetNamespace(namespace)
+		obj.SetName(name)
+		return obj
+	}
+	dynamicClient := fake.NewSimpleDynamicClient(scheme, app("argocd", "control-plane"), app("team-a", "enabled"), app("team-b", "not-enabled"))
+	nc := NewController(k8sfake.NewSimpleClientset(), dynamicClient, nil, "argocd", []string{"team-a"}, "", nil, "my-secret", "my-configmap", false)
+
+	require.NoError(t, nc.Init(t.Context()))
+	assert.ElementsMatch(t, []string{"argocd/control-plane", "team-a/enabled"}, nc.appInformer.GetStore().ListKeys())
+
+	// The application from the namespace that is not enabled is created first, so it has been through
+	// the informer by the time the enabled one shows up.
+	_, err := dynamicClient.Resource(applications).Namespace("team-b").Create(t.Context(), app("team-b", "not-enabled-later"), metav1.CreateOptions{})
+	require.NoError(t, err)
+	_, err = dynamicClient.Resource(applications).Namespace("team-a").Create(t.Context(), app("team-a", "enabled-later"), metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		assert.Contains(c, nc.appInformer.GetStore().ListKeys(), "team-a/enabled-later")
+	}, 5*time.Second, 10*time.Millisecond)
+	assert.ElementsMatch(t, []string{"argocd/control-plane", "team-a/enabled", "team-a/enabled-later"}, nc.appInformer.GetStore().ListKeys())
+}
+
+// Without application namespaces the controller only watches its own namespace.
+func TestNewController_AppInformerWatchesOwnNamespaceByDefault(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, v1alpha1.SchemeBuilder.AddToScheme(scheme))
+	app := func(namespace string) *unstructured.Unstructured {
+		obj := &unstructured.Unstructured{}
+		obj.SetAPIVersion("argoproj.io/v1alpha1")
+		obj.SetKind("Application")
+		obj.SetNamespace(namespace)
+		obj.SetName("app")
+		return obj
+	}
+	dynamicClient := fake.NewSimpleDynamicClient(scheme, app("argocd"), app("team-a"))
+	nc := NewController(k8sfake.NewSimpleClientset(), dynamicClient, nil, "argocd", []string{}, "", nil, "my-secret", "my-configmap", false)
+
+	require.NoError(t, nc.Init(t.Context()))
+	assert.Equal(t, []string{"argocd/app"}, nc.appInformer.GetStore().ListKeys())
 }
